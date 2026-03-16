@@ -63,7 +63,7 @@ class LoggerConfig(draccus.ChoiceRegistry, abc.ABC):
         ...     entity: str | None = None
     """
 
-    enable: bool = False
+    enable: bool = True
     disable_artifact: bool = False
 
     @property

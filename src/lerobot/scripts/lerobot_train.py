@@ -33,10 +33,11 @@ from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
 from lerobot.envs.factory import make_env, make_env_pre_post_processors
 from lerobot.envs.utils import close_envs
+from lerobot.loggers import CompositeLogger, make_logger
+from lerobot.loggers.wandb import WandBLoggerConfig
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
-from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
@@ -196,12 +197,45 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))
 
-    # Initialize wandb only on main process
-    if cfg.wandb.enable and cfg.wandb.project and is_main_process:
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
-        if is_main_process:
+    # Initialize logger only on main process
+    # The new logger system supports both the old `wandb` config (backward compatibility)
+    # and the new `logger` config for custom logging backends.
+    logger = None
+    if is_main_process:
+        if cfg.logger is not None and cfg.logger.enable:
+            # New logger system: use the explicitly configured logger
+            logger = CompositeLogger([make_logger(cfg.logger, cfg)])
+        elif cfg.wandb.enable and cfg.wandb.project:
+            # Backward compatibility: convert old WandBConfig to WandBLoggerConfig
+            logging.warning(
+                colored(
+                    "\n"
+                    "  ⚠️  DEPRECATION WARNING: --wandb.* flags are deprecated and will be removed in a future release.\n"
+                    "  Please migrate to the new logger system:\n"
+                    "\n"
+                    "    OLD (deprecated):\n"
+                    "      --wandb.enable=true --wandb.project=<proj> --wandb.mode=online\n"
+                    "\n"
+                    "    NEW (recommended):\n"
+                    "      --logger.type=wandb --logger.project=<proj> --logger.enable=true --logger.mode=online\n",
+                    "yellow",
+                    attrs=["bold"],
+                )
+            )
+            wandb_logger_cfg = WandBLoggerConfig(
+                enable=cfg.wandb.enable,
+                disable_artifact=cfg.wandb.disable_artifact,
+                project=cfg.wandb.project,
+                entity=cfg.wandb.entity,
+                notes=cfg.wandb.notes,
+                run_id=cfg.wandb.run_id,
+                mode=cfg.wandb.mode,
+            )
+            logger = CompositeLogger([make_logger(wandb_logger_cfg, cfg)])
+            # Sync run_id back to cfg.wandb for potential resumption
+            cfg.wandb.run_id = wandb_logger_cfg.run_id
+        else:
+            logger = CompositeLogger([])  # Empty logger, no-op
             logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     if cfg.seed is not None:
@@ -433,21 +467,21 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
         if is_log_step:
             logging.info(train_tracker)
-            if wandb_logger:
-                wandb_log_dict = train_tracker.to_dict()
+            if logger:
+                log_dict = train_tracker.to_dict()
                 if output_dict:
-                    wandb_log_dict.update(output_dict)
+                    log_dict.update(output_dict)
                 # Log RA-BC statistics if enabled
                 if rabc_weights is not None:
                     rabc_stats = rabc_weights.get_stats()
-                    wandb_log_dict.update(
+                    log_dict.update(
                         {
                             "rabc_delta_mean": rabc_stats["delta_mean"],
                             "rabc_delta_std": rabc_stats["delta_std"],
                             "rabc_num_frames": rabc_stats["num_frames"],
                         }
                     )
-                wandb_logger.log_dict(wandb_log_dict, step)
+                logger.log_dict(log_dict, step)
             train_tracker.reset_averages()
 
         if cfg.save_checkpoint and is_saving_step:
@@ -465,8 +499,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     postprocessor=postprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
-                if wandb_logger:
-                    wandb_logger.log_policy(checkpoint_dir)
+                if logger:
+                    logger.log_policy(checkpoint_dir)
 
             accelerator.wait_for_everyone()
 
@@ -512,10 +546,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 eval_tracker.eval_s = aggregated.pop("eval_s")
                 eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
                 eval_tracker.pc_success = aggregated.pop("pc_success")
-                if wandb_logger:
-                    wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                if logger:
+                    eval_log_dict = {**eval_tracker.to_dict(), **eval_info}
+                    logger.log_dict(eval_log_dict, step, mode="eval")
+                    logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
 
             accelerator.wait_for_everyone()
 
@@ -536,6 +570,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 unwrapped_policy.push_model_to_hub(cfg)
             preprocessor.push_to_hub(cfg.policy.repo_id)
             postprocessor.push_to_hub(cfg.policy.repo_id)
+
+        # Finalize logger sessions
+        if logger:
+            logger.finish()
 
     # Properly clean up the distributed process group
     accelerator.wait_for_everyone()

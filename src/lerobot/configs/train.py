@@ -26,6 +26,7 @@ from lerobot import envs
 from lerobot.configs import parser
 from lerobot.configs.default import DatasetConfig, EvalConfig, PeftConfig, WandBConfig
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.loggers.config import LoggerConfig
 from lerobot.optim import OptimizerConfig
 from lerobot.optim.schedulers import LRSchedulerConfig
 from lerobot.utils.hub import HubMixin
@@ -64,7 +65,13 @@ class TrainPipelineConfig(HubMixin):
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None
     eval: EvalConfig = field(default_factory=EvalConfig)
+    # DEPRECATED: Use `logger` instead. Kept for backward compatibility.
+    # When `logger` is not set but `wandb.enable` is True, WandB will be used.
     wandb: WandBConfig = field(default_factory=WandBConfig)
+    # New pluggable logger system. Supports custom logging backends.
+    # Use `--logger.type=wandb` or `--logger.type=mlflow` etc.
+    # When not set, falls back to `wandb` config for backward compatibility.
+    logger: LoggerConfig | None = None
     peft: PeftConfig | None = None
 
     # RA-BC (Reward-Aligned Behavior Cloning) parameters

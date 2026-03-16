@@ -64,11 +64,12 @@ from lerobot.configs import parser
 from lerobot.configs.train import TrainRLServerPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.loggers import Logger, make_logger
+from lerobot.loggers.wandb import WandBLoggerConfig
 from lerobot.policies.factory import make_policy
 from lerobot.policies.sac.modeling_sac import SACPolicy
 from lerobot.rl.buffer import ReplayBuffer, concatenate_batch_transitions
 from lerobot.rl.process import ProcessSignalHandler
-from lerobot.rl.wandb_utils import WandBLogger
 from lerobot.robots import so_follower  # noqa: F401
 from lerobot.teleoperators import gamepad, so_leader  # noqa: F401
 from lerobot.teleoperators.utils import TeleopEvents
@@ -86,6 +87,7 @@ from lerobot.utils.constants import (
     PRETRAINED_MODEL_DIR,
     TRAINING_STATE_DIR,
 )
+from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
     get_step_checkpoint_dir,
@@ -150,13 +152,27 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
     logging.info(f"Learner logging initialized, writing to {log_file}")
     logging.info(pformat(cfg.to_dict()))
 
-    # Setup WandB logging if enabled
-    if cfg.wandb.enable and cfg.wandb.project:
-        from lerobot.rl.wandb_utils import WandBLogger
+    # New logger system: use cfg.logger if present.
+    # Backward compatibility: fall back to cfg.wandb when cfg.logger is not set.
+    logger_backend = None
+    if cfg.logger is not None and cfg.logger.enable:
+        can_init_logger = not (cfg.logger.type == "wandb" and not getattr(cfg.logger, "project", None))
+        logger_backend = make_logger(cfg.logger, cfg) if can_init_logger else None
+    elif cfg.wandb.enable and cfg.wandb.project:
+        wandb_logger_cfg = WandBLoggerConfig(
+            enable=cfg.wandb.enable,
+            disable_artifact=cfg.wandb.disable_artifact,
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            notes=cfg.wandb.notes,
+            run_id=cfg.wandb.run_id,
+            mode=cfg.wandb.mode,
+        )
+        logger_backend = make_logger(wandb_logger_cfg, cfg)
+        # Keep run_id in sync for resume behavior.
+        cfg.wandb.run_id = wandb_logger_cfg.run_id
 
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
+    if logger_backend is None:
         logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     # Handle resume logic
@@ -172,14 +188,14 @@ def train(cfg: TrainRLServerPipelineConfig, job_name: str | None = None):
 
     start_learner_threads(
         cfg=cfg,
-        wandb_logger=wandb_logger,
+        logger_backend=logger_backend,
         shutdown_event=shutdown_event,
     )
 
 
 def start_learner_threads(
     cfg: TrainRLServerPipelineConfig,
-    wandb_logger: WandBLogger | None,
+    logger_backend: Logger | None,
     shutdown_event: any,  # Event,
 ) -> None:
     """
@@ -187,7 +203,7 @@ def start_learner_threads(
 
     Args:
         cfg (TrainRLServerPipelineConfig): Training configuration
-        wandb_logger (WandBLogger | None): Logger for metrics
+        logger_backend (Logger | None): Logger for metrics
         shutdown_event: Event to signal shutdown
     """
     # Create multiprocessing queues
@@ -221,7 +237,7 @@ def start_learner_threads(
 
     add_actor_information_and_train(
         cfg=cfg,
-        wandb_logger=wandb_logger,
+        logger_backend=logger_backend,
         shutdown_event=shutdown_event,
         transition_queue=transition_queue,
         interaction_message_queue=interaction_message_queue,
@@ -250,7 +266,7 @@ def start_learner_threads(
 
 def add_actor_information_and_train(
     cfg: TrainRLServerPipelineConfig,
-    wandb_logger: WandBLogger | None,
+    logger_backend: Logger | None,
     shutdown_event: any,  # Event,
     transition_queue: Queue,
     interaction_message_queue: Queue,
@@ -274,7 +290,7 @@ def add_actor_information_and_train(
 
     Args:
         cfg (TrainRLServerPipelineConfig): Configuration object containing hyperparameters.
-        wandb_logger (WandBLogger | None): Logger for tracking training progress.
+        logger_backend (Logger | None): Logger for tracking training progress.
         shutdown_event (Event): Event to signal shutdown.
         transition_queue (Queue): Queue for receiving transitions from the actor.
         interaction_message_queue (Queue): Queue for receiving interaction messages from the actor.
@@ -372,7 +388,7 @@ def add_actor_information_and_train(
         interaction_message = process_interaction_messages(
             interaction_message_queue=interaction_message_queue,
             interaction_step_shift=interaction_step_shift,
-            wandb_logger=wandb_logger,
+            logger_backend=logger_backend,
             shutdown_event=shutdown_event,
         )
 
@@ -561,8 +577,8 @@ def add_actor_information_and_train(
             training_infos["Optimization step"] = optimization_step
 
             # Log training metrics
-            if wandb_logger:
-                wandb_logger.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")
+            if logger_backend:
+                logger_backend.log_dict(d=training_infos, mode="train", custom_step_key="Optimization step")
 
         # Calculate and log optimization frequency
         time_for_one_optimization_step = time.time() - time_for_one_optimization_step
@@ -571,8 +587,8 @@ def add_actor_information_and_train(
         logging.info(f"[LEARNER] Optimization frequency loop [Hz]: {frequency_for_one_optimization_step}")
 
         # Log optimization frequency
-        if wandb_logger:
-            wandb_logger.log_dict(
+        if logger_backend:
+            logger_backend.log_dict(
                 {
                     "Optimization frequency loop [Hz]": frequency_for_one_optimization_step,
                     "Optimization step": optimization_step,
@@ -1108,17 +1124,15 @@ def push_actor_policy_to_queue(parameters_queue: Queue, policy: nn.Module):
     parameters_queue.put(state_bytes)
 
 
-def process_interaction_message(
-    message, interaction_step_shift: int, wandb_logger: WandBLogger | None = None
-):
+def process_interaction_message(message, interaction_step_shift: int, logger_backend: Logger | None = None):
     """Process a single interaction message with consistent handling."""
     message = bytes_to_python_object(message)
     # Shift interaction step for consistency with checkpointed state
     message["Interaction step"] += interaction_step_shift
 
     # Log if logger available
-    if wandb_logger:
-        wandb_logger.log_dict(d=message, mode="train", custom_step_key="Interaction step")
+    if logger_backend:
+        logger_backend.log_dict(d=message, mode="train", custom_step_key="Interaction step")
 
     return message
 
@@ -1169,7 +1183,7 @@ def process_transitions(
 def process_interaction_messages(
     interaction_message_queue: Queue,
     interaction_step_shift: int,
-    wandb_logger: WandBLogger | None,
+    logger_backend: Logger | None,
     shutdown_event: any,
 ) -> dict | None:
     """Process all available interaction messages from the queue.
@@ -1177,7 +1191,7 @@ def process_interaction_messages(
     Args:
         interaction_message_queue: Queue for receiving interaction messages
         interaction_step_shift: Amount to shift interaction step by
-        wandb_logger: Logger for tracking progress
+        logger_backend: Logger for tracking progress
         shutdown_event: Event to signal shutdown
 
     Returns:
@@ -1189,12 +1203,13 @@ def process_interaction_messages(
         last_message = process_interaction_message(
             message=message,
             interaction_step_shift=interaction_step_shift,
-            wandb_logger=wandb_logger,
+            logger_backend=logger_backend,
         )
 
     return last_message
 
 
 if __name__ == "__main__":
+    register_third_party_plugins()
     train_cli()
     logging.info("[LEARNER] main finished")

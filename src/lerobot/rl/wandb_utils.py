@@ -13,6 +13,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+DEPRECATED: This module is kept for backward compatibility with the RL learner.
+
+For new code, please use the pluggable logger system in lerobot.loggers:
+    from lerobot.loggers import WandBLogger, WandBLoggerConfig, make_logger
+
+The new logger system supports multiple logging backends and follows
+the "Bring Your Own Logger" philosophy.
+"""
+
 import logging
 import os
 import re

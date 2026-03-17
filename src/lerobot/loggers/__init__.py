@@ -21,6 +21,7 @@ their own logging backends. The design follows the "Bring Your Own Logger"
 philosophy, similar to the existing "Bring Your Own Hardware" functionality.
 
 Built-in loggers:
+    - MLFlowLogger: Integration with MLflow
     - WandBLogger: Integration with Weights & Biases (default)
 
 To implement a custom logger:
@@ -34,12 +35,15 @@ from lerobot.loggers.composite import CompositeLogger
 from lerobot.loggers.config import LoggerConfig
 from lerobot.loggers.factory import make_logger, make_loggers, register_logger
 from lerobot.loggers.logger import Logger
+from lerobot.loggers.mlflow import MLFlowLogger, MLFlowLoggerConfig
 from lerobot.loggers.wandb import WandBLogger, WandBLoggerConfig
 
 __all__ = [
     "CompositeLogger",
     "Logger",
     "LoggerConfig",
+    "MLFlowLogger",
+    "MLFlowLoggerConfig",
     "make_logger",
     "make_loggers",
     "register_logger",

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 # Registry mapping logger type names to their implementation module paths
 # This allows for lazy loading of logger implementations
 _LOGGER_REGISTRY: dict[str, tuple[str, str]] = {
+    "mlflow": ("lerobot.loggers.mlflow", "MLFlowLogger"),
     "wandb": ("lerobot.loggers.wandb", "WandBLogger"),
 }
 

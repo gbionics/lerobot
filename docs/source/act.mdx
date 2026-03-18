@@ -60,9 +60,13 @@ lerobot-train \
   --output_dir=outputs/train/act_your_dataset \
   --job_name=act_your_dataset \
   --policy.device=cuda \
-  --wandb.enable=true \
+  --logger.type=wandb \
   --policy.repo_id=${HF_USER}/act_policy
 ```
+
+You can also switch to LeRobot's built-in MLflow backend with
+`--logger.type=mlflow` and optional
+`--logger.experiment_name=<your_experiment>`.
 
 ### Training Tips
 

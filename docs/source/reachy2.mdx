@@ -292,9 +292,12 @@ lerobot-train \
   --output_dir=outputs/train/reachy2_test \
   --job_name=reachy2 \
   --policy.device=mps \
-  --wandb.enable=true \
+  --logger.type=wandb \
   --policy.repo_id=pollen_robotics/record_test_policy
 ```
+
+You can also use the built-in MLflow logger with
+`--logger.type=mlflow` and optional `--logger.experiment_name=<name>`.
 
 ## Step 4: Evaluate
 

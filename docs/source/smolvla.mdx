@@ -62,8 +62,12 @@ cd lerobot && lerobot-train \
   --output_dir=outputs/train/my_smolvla \
   --job_name=my_smolvla_training \
   --policy.device=cuda \
-  --wandb.enable=true
+  --logger.type=wandb
 ```
+
+You can replace W&B with LeRobot's built-in MLflow backend by using
+`--logger.type=mlflow` and optionally
+`--logger.experiment_name=<your_experiment>`.
 
 <Tip>
   You can start with a small batch size and increase it incrementally, if the

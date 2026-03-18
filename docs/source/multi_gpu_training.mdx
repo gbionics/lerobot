@@ -28,8 +28,12 @@ accelerate launch \
   --policy.repo_id=${HF_USER}/my_trained_policy \
   --output_dir=outputs/train/act_multi_gpu \
   --job_name=act_multi_gpu \
-  --wandb.enable=true
+  --logger.type=wandb
 ```
+
+You can use MLflow instead of W&B by replacing the W&B flag with
+`--logger.type=mlflow` and optional
+`--logger.experiment_name=<your_experiment>`.
 
 **Key accelerate parameters:**
 
@@ -62,7 +66,7 @@ accelerate launch $(which lerobot-train) \
   --policy.repo_id=${HF_USER}/my_trained_policy \
   --output_dir=outputs/train/act_multi_gpu \
   --job_name=act_multi_gpu \
-  --wandb.enable=true
+  --logger.type=wandb
 ```
 
 ## How It Works
@@ -72,7 +76,8 @@ When you launch training with accelerate:
 1. **Automatic detection**: LeRobot automatically detects if it's running under accelerate
 2. **Data distribution**: Your batch is automatically split across GPUs
 3. **Gradient synchronization**: Gradients are synchronized across GPUs during backpropagation
-4. **Single process logging**: Only the main process logs to wandb and saves checkpoints
+4. **Single process logging**: Only the main process logs to the selected
+   logger backend (W&B or MLflow) and saves checkpoints
 
 ## Learning Rate and Training Steps Scaling
 

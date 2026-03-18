@@ -80,10 +80,14 @@ accelerate launch \
   --policy.repo_id=$REPO_ID \
   --policy.tune_diffusion_model=false \
   --dataset.repo_id=$DATASET_ID \
-  --wandb.enable=true \
-  --wandb.disable_artifact=true \
+  --logger.type=wandb \
+  --logger.disable_artifact=true \
   --job_name=$JOB_NAME
 ```
+
+LeRobot also supports built-in MLflow logging. Use
+`--logger.type=mlflow` and optional `--logger.experiment_name=<name>` if
+you want MLflow instead of W&B.
 
 ## Performance Results
 

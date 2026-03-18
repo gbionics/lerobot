@@ -457,7 +457,7 @@ lerobot-train \
   --output_dir=outputs/train/act_so101_test \
   --job_name=act_so101_test \
   --policy.device=cuda \
-  --wandb.enable=true \
+    --logger.type=wandb \
   --policy.repo_id=${HF_USER}/my_policy
 ```
 
@@ -466,7 +466,9 @@ Let's explain the command:
 1. We provided the dataset as argument with `--dataset.repo_id=${HF_USER}/so101_test`.
 2. We provided the policy with `policy.type=act`. This loads configurations from [`configuration_act.py`](https://github.com/huggingface/lerobot/blob/main/src/lerobot/policies/act/configuration_act.py). Importantly, this policy will automatically adapt to the number of motor states, motor actions and cameras of your robot (e.g. `laptop` and `phone`) which have been saved in your dataset.
 3. We provided `policy.device=cuda` since we are training on a Nvidia GPU, but you could use `policy.device=mps` to train on Apple silicon.
-4. We provided `wandb.enable=true` to use [Weights and Biases](https://docs.wandb.ai/quickstart) for visualizing training plots. This is optional but if you use it, make sure you are logged in by running `wandb login`.
+4. We provided `logger.type=wandb` to use [Weights and Biases](https://docs.wandb.ai/quickstart) for visualizing training plots. This is optional but if you use it, make sure you are logged in by running `wandb login`.
+5. You can also use LeRobot's built-in MLflow backend instead of W&B by passing
+   `--logger.type=mlflow` (and optionally `--logger.experiment_name=<name>`).
 
 Training should take several hours. You will find checkpoints in `outputs/train/act_so101_test/checkpoints`.
 

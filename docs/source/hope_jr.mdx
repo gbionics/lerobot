@@ -257,9 +257,12 @@ lerobot-train \
   --output_dir=outputs/train/hopejr_hand \
   --job_name=hopejr \
   --policy.device=mps \
-  --wandb.enable=true \
+  --logger.type=wandb \
   --policy.repo_id=<USER>/hand_test_policy
 ```
+
+If you prefer MLflow, LeRobot also provides a built-in MLflow backend via
+`--logger.type=mlflow` and optional `--logger.experiment_name=<name>`.
 
 ### Evaluate
 

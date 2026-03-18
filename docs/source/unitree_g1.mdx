@@ -260,7 +260,7 @@ python src/lerobot/scripts/lerobot_train.py \
   --policy.pretrained_path=lerobot/pi05_base \
   --policy.compile_model=true \
   --policy.gradient_checkpointing=true \
-  --wandb.enable=true \
+  --logger.type=wandb \
   --policy.dtype=bfloat16 \
   --policy.freeze_vision_encoder=false \
   --policy.train_expert_only=false \
@@ -268,6 +268,10 @@ python src/lerobot/scripts/lerobot_train.py \
   --policy.device=cuda \
   --batch_size=32
 ```
+
+If you prefer MLflow over W&B, LeRobot includes built-in MLflow support via
+`--logger.type=mlflow` and optional
+`--logger.experiment_name=<your_experiment>`.
 
 ### Inference with RTC
 

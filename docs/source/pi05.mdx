@@ -60,7 +60,7 @@ lerobot-train \
     --policy.pretrained_path=lerobot/pi05_base \
     --policy.compile_model=true \
     --policy.gradient_checkpointing=true \
-    --wandb.enable=true \
+  --logger.type=wandb \
     --policy.dtype=bfloat16 \
     --policy.freeze_vision_encoder=false \
     --policy.train_expert_only=false \
@@ -68,6 +68,10 @@ lerobot-train \
     --policy.device=cuda \
     --batch_size=32
 ```
+
+The command uses W&B for tracking, but you can use LeRobot's built-in
+MLflow backend instead with `--logger.type=mlflow` and optional
+`--logger.experiment_name=<your_experiment>`.
 
 ### Key Training Parameters
 

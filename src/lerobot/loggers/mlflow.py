@@ -49,6 +49,9 @@ class MLFlowLoggerConfig(LoggerConfig):
     tracking_uri: str | None = None
     run_name: str | None = None
     tags: dict[str, str] | None = None
+    log_system_metrics: bool = False
+    system_metrics_sampling_interval: int | None = None
+    system_metrics_samples_before_logging: int | None = None
 
 
 class MLFlowLogger(Logger):
@@ -69,6 +72,38 @@ class MLFlowLogger(Logger):
 
         if cfg.tracking_uri:
             mlflow.set_tracking_uri(cfg.tracking_uri)
+
+        if cfg.log_system_metrics:
+            # MLflow system metrics are opt-in and version dependent.
+            if hasattr(mlflow, "enable_system_metrics_logging"):
+                mlflow.enable_system_metrics_logging()
+            else:
+                logging.warning(
+                    "Installed MLflow does not expose enable_system_metrics_logging(); "
+                    "system metrics will not be collected."
+                )
+
+            if cfg.system_metrics_sampling_interval is not None:
+                if hasattr(mlflow, "set_system_metrics_sampling_interval"):
+                    mlflow.set_system_metrics_sampling_interval(cfg.system_metrics_sampling_interval)
+                else:
+                    logging.warning(
+                        "Installed MLflow does not expose set_system_metrics_sampling_interval(); "
+                        "ignoring system_metrics_sampling_interval=%s.",
+                        cfg.system_metrics_sampling_interval,
+                    )
+
+            if cfg.system_metrics_samples_before_logging is not None:
+                if hasattr(mlflow, "set_system_metrics_samples_before_logging"):
+                    mlflow.set_system_metrics_samples_before_logging(
+                        cfg.system_metrics_samples_before_logging
+                    )
+                else:
+                    logging.warning(
+                        "Installed MLflow does not expose set_system_metrics_samples_before_logging(); "
+                        "ignoring system_metrics_samples_before_logging=%s.",
+                        cfg.system_metrics_samples_before_logging,
+                    )
 
         experiment = mlflow.get_experiment_by_name(cfg.experiment_name)
         if experiment is None:

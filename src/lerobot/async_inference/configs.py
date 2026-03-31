@@ -23,6 +23,7 @@ from .constants import (
     DEFAULT_FPS,
     DEFAULT_INFERENCE_LATENCY,
     DEFAULT_OBS_QUEUE_TIMEOUT,
+    DEFAULT_SIMILARITY_FN_NAME,
 )
 
 # Aggregate function registry for CLI usage
@@ -33,8 +34,16 @@ AGGREGATE_FUNCTIONS = {
     "conservative": lambda old, new: 0.7 * old + 0.3 * new,
 }
 
+SIMILARITY_FUNCTIONS = {
+    "euclidean": lambda s1, s2, tol: torch.linalg.norm(s1 - s2) < tol,
+    "deactivate_similarity_check": lambda _, __, ___: False,  # Always return False, never skip an observation due to similarity
+    # Add more similarity functions as needed
+}
 
-def get_aggregate_function(name: str) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+
+def get_aggregate_function(
+    name: str,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
     """Get aggregate function by name from registry."""
     if name not in AGGREGATE_FUNCTIONS:
         available = list(AGGREGATE_FUNCTIONS.keys())
@@ -51,17 +60,30 @@ class PolicyServerConfig:
     """
 
     # Networking configuration
-    host: str = field(default="localhost", metadata={"help": "Host address to bind the server to"})
-    port: int = field(default=8080, metadata={"help": "Port number to bind the server to"})
+    host: str = field(
+        default="localhost", metadata={"help": "Host address to bind the server to"}
+    )
+    port: int = field(
+        default=8080, metadata={"help": "Port number to bind the server to"}
+    )
 
     # Timing configuration
     fps: int = field(default=DEFAULT_FPS, metadata={"help": "Frames per second"})
     inference_latency: float = field(
-        default=DEFAULT_INFERENCE_LATENCY, metadata={"help": "Target inference latency in seconds"}
+        default=DEFAULT_INFERENCE_LATENCY,
+        metadata={"help": "Target inference latency in seconds"},
     )
 
     obs_queue_timeout: float = field(
-        default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
+        default=DEFAULT_OBS_QUEUE_TIMEOUT,
+        metadata={"help": "Timeout for observation queue in seconds"},
+    )
+
+    similarity_fn_name: str = field(
+        default=DEFAULT_SIMILARITY_FN_NAME,
+        metadata={
+            "help": f"Name of similarity function to use. Options: {list(SIMILARITY_FUNCTIONS.keys())}"
+        },
     )
 
     def __post_init__(self):
@@ -70,13 +92,19 @@ class PolicyServerConfig:
             raise ValueError(f"Port must be between 1 and 65535, got {self.port}")
 
         if self.environment_dt <= 0:
-            raise ValueError(f"environment_dt must be positive, got {self.environment_dt}")
+            raise ValueError(
+                f"environment_dt must be positive, got {self.environment_dt}"
+            )
 
         if self.inference_latency < 0:
-            raise ValueError(f"inference_latency must be non-negative, got {self.inference_latency}")
+            raise ValueError(
+                f"inference_latency must be non-negative, got {self.inference_latency}"
+            )
 
         if self.obs_queue_timeout < 0:
-            raise ValueError(f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}")
+            raise ValueError(
+                f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}"
+            )
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PolicyServerConfig":
@@ -109,7 +137,9 @@ class RobotClientConfig:
 
     # Policy configuration
     policy_type: str = field(metadata={"help": "Type of policy to use"})
-    pretrained_name_or_path: str = field(metadata={"help": "Pretrained model name or path"})
+    pretrained_name_or_path: str = field(
+        metadata={"help": "Pretrained model name or path"}
+    )
 
     # Robot configuration (for CLI usage - robot instance will be created from this)
     robot: RobotConfig = field(metadata={"help": "Robot configuration"})
@@ -119,13 +149,19 @@ class RobotClientConfig:
     actions_per_chunk: int = field(metadata={"help": "Number of actions per chunk"})
 
     # Task instruction for the robot to execute (e.g., 'fold my tshirt')
-    task: str = field(default="", metadata={"help": "Task instruction for the robot to execute"})
+    task: str = field(
+        default="", metadata={"help": "Task instruction for the robot to execute"}
+    )
 
     # Network configuration
-    server_address: str = field(default="localhost:8080", metadata={"help": "Server address to connect to"})
+    server_address: str = field(
+        default="localhost:8080", metadata={"help": "Server address to connect to"}
+    )
 
     # Device configuration
-    policy_device: str = field(default="cpu", metadata={"help": "Device for policy inference"})
+    policy_device: str = field(
+        default="cpu", metadata={"help": "Device for policy inference"}
+    )
     client_device: str = field(
         default="cpu",
         metadata={
@@ -134,13 +170,17 @@ class RobotClientConfig:
     )
 
     # Control behavior configuration
-    chunk_size_threshold: float = field(default=0.5, metadata={"help": "Threshold for chunk size control"})
+    chunk_size_threshold: float = field(
+        default=0.5, metadata={"help": "Threshold for chunk size control"}
+    )
     fps: int = field(default=DEFAULT_FPS, metadata={"help": "Frames per second"})
 
     # Aggregate function configuration (CLI-compatible)
     aggregate_fn_name: str = field(
         default="weighted_average",
-        metadata={"help": f"Name of aggregate function to use. Options: {list(AGGREGATE_FUNCTIONS.keys())}"},
+        metadata={
+            "help": f"Name of aggregate function to use. Options: {list(AGGREGATE_FUNCTIONS.keys())}"
+        },
     )
 
     # Debug configuration
@@ -171,13 +211,17 @@ class RobotClientConfig:
             raise ValueError("client_device cannot be empty")
 
         if self.chunk_size_threshold < 0 or self.chunk_size_threshold > 1:
-            raise ValueError(f"chunk_size_threshold must be between 0 and 1, got {self.chunk_size_threshold}")
+            raise ValueError(
+                f"chunk_size_threshold must be between 0 and 1, got {self.chunk_size_threshold}"
+            )
 
         if self.fps <= 0:
             raise ValueError(f"fps must be positive, got {self.fps}")
 
         if self.actions_per_chunk <= 0:
-            raise ValueError(f"actions_per_chunk must be positive, got {self.actions_per_chunk}")
+            raise ValueError(
+                f"actions_per_chunk must be positive, got {self.actions_per_chunk}"
+            )
 
         self.aggregate_fn = get_aggregate_function(self.aggregate_fn_name)
 

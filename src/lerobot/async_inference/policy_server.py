@@ -85,8 +85,12 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.lerobot_features = None
         self.actions_per_chunk = None
         self.policy = None
-        self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
-        self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+        self.preprocessor: (
+            PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None
+        ) = None
+        self.postprocessor: (
+            PolicyProcessorPipeline[PolicyAction, PolicyAction] | None
+        ) = None
 
     @property
     def running(self):
@@ -125,7 +129,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         policy_specs = pickle.loads(request.data)  # nosec
 
         if not isinstance(policy_specs, RemotePolicyConfig):
-            raise TypeError(f"Policy specs must be a RemotePolicyConfig. Got {type(policy_specs)}")
+            raise TypeError(
+                f"Policy specs must be a RemotePolicyConfig. Got {type(policy_specs)}"
+            )
 
         if policy_specs.policy_type not in SUPPORTED_POLICIES:
             raise ValueError(
@@ -159,14 +165,18 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             pretrained_path=policy_specs.pretrained_name_or_path,
             preprocessor_overrides={
                 "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+                "rename_observations_processor": {
+                    "rename_map": policy_specs.rename_map
+                },
             },
             postprocessor_overrides={"device_processor": device_override},
         )
 
         end = time.perf_counter()
 
-        self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+        self.logger.info(
+            f"Time taken to put policy on {self.device}: {end - start:.4f} seconds"
+        )
 
         return services_pb2.Empty()
 
@@ -252,7 +262,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             )
 
             time.sleep(
-                max(0, self.config.inference_latency - max(0, time.perf_counter() - getactions_starts))
+                max(
+                    0,
+                    self.config.inference_latency
+                    - max(0, time.perf_counter() - getactions_starts),
+                )
             )  # sleep controls inference latency
 
             return actions
@@ -265,16 +279,25 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
             return services_pb2.Empty()
 
-    def _obs_sanity_checks(self, obs: TimedObservation, previous_obs: TimedObservation) -> bool:
+    def _obs_sanity_checks(
+        self, obs: TimedObservation, previous_obs: TimedObservation
+    ) -> bool:
         """Check if the observation is valid to be processed by the policy"""
         with self._predicted_timesteps_lock:
             predicted_timesteps = self._predicted_timesteps
 
         if obs.get_timestep() in predicted_timesteps:
-            self.logger.debug(f"Skipping observation #{obs.get_timestep()} - Timestep predicted already!")
+            self.logger.debug(
+                f"Skipping observation #{obs.get_timestep()} - Timestep predicted already!"
+            )
             return False
 
-        elif observations_similar(obs, previous_obs, lerobot_features=self.lerobot_features):
+        elif observations_similar(
+            obs,
+            previous_obs,
+            lerobot_features=self.lerobot_features,
+            similarity_fn=self.config.similarity_fn,
+        ):
             self.logger.debug(
                 f"Skipping observation #{obs.get_timestep()} - Observation too similar to last obs predicted!"
             )
@@ -292,7 +315,11 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             or self.last_processed_obs is None
             or self._obs_sanity_checks(obs, self.last_processed_obs)
         ):
-            last_obs = self.last_processed_obs.get_timestep() if self.last_processed_obs else "None"
+            last_obs = (
+                self.last_processed_obs.get_timestep()
+                if self.last_processed_obs
+                else "None"
+            )
             self.logger.debug(
                 f"Enqueuing observation. Must go: {obs.must_go} | Last processed obs: {last_obs}"
             )
@@ -301,7 +328,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             if self.observation_queue.full():
                 # pops from queue
                 _ = self.observation_queue.get_nowait()
-                self.logger.debug("Observation queue was full, removed oldest observation")
+                self.logger.debug(
+                    "Observation queue was full, removed oldest observation"
+                )
 
             # Now put the new observation (never blocks as queue is non-full here)
             self.observation_queue.put(obs)
@@ -309,13 +338,19 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         return False
 
-    def _time_action_chunk(self, t_0: float, action_chunk: list[torch.Tensor], i_0: int) -> list[TimedAction]:
+    def _time_action_chunk(
+        self, t_0: float, action_chunk: list[torch.Tensor], i_0: int
+    ) -> list[TimedAction]:
         """Turn a chunk of actions into a list of TimedAction instances,
         with the first action corresponding to t_0 and the rest corresponding to
         t_0 + i*environment_dt for i in range(len(action_chunk))
         """
         return [
-            TimedAction(timestamp=t_0 + i * self.config.environment_dt, timestep=i_0 + i, action=action)
+            TimedAction(
+                timestamp=t_0 + i * self.config.environment_dt,
+                timestep=i_0 + i,
+                action=action,
+            )
             for i, action in enumerate(action_chunk)
         ]
 
@@ -323,11 +358,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         """Get an action chunk from the policy. The chunk contains only"""
         chunk = self.policy.predict_action_chunk(observation)
         if chunk.ndim != 3:
-            chunk = chunk.unsqueeze(0)  # adding batch dimension, now shape is (B, chunk_size, action_dim)
+            chunk = chunk.unsqueeze(
+                0
+            )  # adding batch dimension, now shape is (B, chunk_size, action_dim)
 
         return chunk[:, : self.actions_per_chunk, :]
 
-    def _predict_action_chunk(self, observation_t: TimedObservation) -> list[TimedAction]:
+    def _predict_action_chunk(
+        self, observation_t: TimedObservation
+    ) -> list[TimedAction]:
         """Predict an action chunk based on an observation.
 
         Pipeline:
@@ -383,7 +422,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """5. Convert to TimedAction list"""
         action_chunk = self._time_action_chunk(
-            observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
+            observation_t.get_timestamp(),
+            list(action_tensor),
+            observation_t.get_timestep(),
         )
         postprocess_stops = time.perf_counter()
         postprocessing_time = postprocess_stops - start_postprocess

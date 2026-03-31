@@ -22,9 +22,6 @@ DEFAULT_INFERENCE_LATENCY = 1 / DEFAULT_FPS
 """Server side: Timeout for observation queue in seconds"""
 DEFAULT_OBS_QUEUE_TIMEOUT = 2
 
-"""Name of similarity function to use. Options: 'euclidean', 'deactivate_similarity_check'"""
-DEFAULT_SIMILARITY_FN_NAME = "euclidean"
-
 # All action chunking policies
 SUPPORTED_POLICIES = [
     "act",

@@ -291,7 +291,7 @@ def _compare_observation_states(
     obs1_state: torch.Tensor,
     obs2_state: torch.Tensor,
     atol: float,
-    similarity_fn: callable[[torch.Tensor, torch.Tensor, float], bool],
+    similarity_fn: callable,
 ) -> bool:
     """Check if two observation states are similar, under a tolerance threshold"""
     return bool(similarity_fn(obs1_state, obs2_state, atol))

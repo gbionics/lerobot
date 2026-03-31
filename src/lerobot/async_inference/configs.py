@@ -23,7 +23,6 @@ from .constants import (
     DEFAULT_FPS,
     DEFAULT_INFERENCE_LATENCY,
     DEFAULT_OBS_QUEUE_TIMEOUT,
-    DEFAULT_SIMILARITY_FN_NAME,
 )
 
 # Aggregate function registry for CLI usage
@@ -49,6 +48,18 @@ def get_aggregate_function(
         available = list(AGGREGATE_FUNCTIONS.keys())
         raise ValueError(f"Unknown aggregate function '{name}'. Available: {available}")
     return AGGREGATE_FUNCTIONS[name]
+
+
+def get_similarity_function(
+    name: str,
+) -> Callable[[torch.Tensor, torch.Tensor, float], bool]:
+    """Get similarity function by name from registry."""
+    if name not in SIMILARITY_FUNCTIONS:
+        available = list(SIMILARITY_FUNCTIONS.keys())
+        raise ValueError(
+            f"Unknown similarity function '{name}'. Available: {available}"
+        )
+    return SIMILARITY_FUNCTIONS[name]
 
 
 @dataclass
@@ -79,8 +90,9 @@ class PolicyServerConfig:
         metadata={"help": "Timeout for observation queue in seconds"},
     )
 
+    # Similarity function configuration (CLI-compatible)
     similarity_fn_name: str = field(
-        default=DEFAULT_SIMILARITY_FN_NAME,
+        default="euclidean",
         metadata={
             "help": f"Name of similarity function to use. Options: {list(SIMILARITY_FUNCTIONS.keys())}"
         },
@@ -105,6 +117,8 @@ class PolicyServerConfig:
             raise ValueError(
                 f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}"
             )
+
+        self.similarity_fn = get_similarity_function(self.similarity_fn_name)
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PolicyServerConfig":
@@ -244,4 +258,5 @@ class RobotClientConfig:
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
+            "similarity_fn_name": self.similarity_fn_name,
         }

@@ -507,12 +507,15 @@ class DatasetWriter:
         }
         return metadata
 
-    def clear_episode_buffer(self, delete_images: bool = True) -> None:
+    def clear_episode_buffer(self, delete_images: bool = True, delete_video_images: bool = True) -> None:
         """Discard the current episode buffer and optionally delete temp images.
 
         Args:
             delete_images: If ``True``, remove temporary image directories
                 written for the current episode.
+            delete_video_images: If ``False``, keep temporary frame directories
+                for video features. This is needed when batched video encoding
+                has not yet run.
         """
         # Cancel streaming encoder if active
         if self._streaming_encoder is not None:
@@ -526,7 +529,9 @@ class DatasetWriter:
             # save_episode() mutates the buffer. Handle both types here.
             if isinstance(episode_index, np.ndarray):
                 episode_index = episode_index.item() if episode_index.size == 1 else episode_index[0]
-            for cam_key in self._meta.image_keys:
+            for cam_key in self._meta.camera_keys:
+                if self._meta.features.get(cam_key, {}).get("dtype") == "video" and not delete_video_images:
+                    continue
                 img_dir = self._get_image_file_dir(episode_index, cam_key)
                 if img_dir.is_dir():
                     shutil.rmtree(img_dir)

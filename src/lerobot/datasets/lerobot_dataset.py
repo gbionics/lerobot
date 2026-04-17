@@ -383,7 +383,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._require_writer("save_episode")
         self.writer.save_episode(episode_data, parallel_encoding)
 
-    def clear_episode_buffer(self, delete_images: bool = True) -> None:
+    def clear_episode_buffer(self, delete_images: bool = True, delete_video_images: bool = True) -> None:
         """Discard the current episode buffer without saving.
 
         Delegates to :meth:`DatasetWriter.clear_episode_buffer`. Useful for
@@ -392,12 +392,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
         Args:
             delete_images: If ``True``, also remove temporary image files written
                 to disk for the current episode.
+            delete_video_images: If ``False``, keep temporary frame directories
+                for video features. This is needed when batched video encoding
+                has not yet run.
 
         Raises:
             RuntimeError: If the dataset is read-only (no writer).
         """
         self._require_writer("clear_episode_buffer")
-        self.writer.clear_episode_buffer(delete_images)
+        self.writer.clear_episode_buffer(delete_images, delete_video_images)
 
     def has_pending_frames(self) -> bool:
         """Check if there are unsaved frames in the episode buffer."""

@@ -106,7 +106,11 @@ class PolicyServerConfig:
         if self.obs_queue_timeout < 0:
             raise ValueError(f"obs_queue_timeout must be non-negative, got {self.obs_queue_timeout}")
 
-        self.similarity_fn = get_similarity_function(self.similarity_fn_name)
+        # Initialize similarity function if name is provided (will be updated by client)
+        if self.similarity_fn_name:
+            self.similarity_fn = get_similarity_function(self.similarity_fn_name)
+        else:
+            self.similarity_fn = None  # Will be set when client config is received
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PolicyServerConfig":

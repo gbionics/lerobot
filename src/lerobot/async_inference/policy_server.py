@@ -434,7 +434,9 @@ def serve(cfg: PolicyServerConfig):
     Args:
         config: PolicyServerConfig instance. If None, uses default configuration.
     """
-    logging.info(pformat(asdict(cfg)))
+    config_dict = asdict(cfg)
+    config_dict.pop("similarity_fn_name", None)
+    logging.info(pformat(config_dict))
 
     # Create the server instance first
     policy_server = PolicyServer(cfg)

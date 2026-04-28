@@ -71,9 +71,7 @@ def is_image_key(k: str) -> bool:
     return k.startswith(OBS_IMAGES)
 
 
-def resize_robot_observation_image(
-    image: torch.tensor, resize_dims: tuple[int, int, int]
-) -> torch.tensor:
+def resize_robot_observation_image(image: torch.tensor, resize_dims: tuple[int, int, int]) -> torch.tensor:
     assert image.ndim == 3, f"Image must be (C, H, W)! Received {image.shape}"
     # (H, W, C) -> (C, H, W) for resizing from robot obsevation resolution to policy image resolution
     image = image.permute(2, 0, 1)
@@ -81,9 +79,7 @@ def resize_robot_observation_image(
     # Add batch dimension for interpolate: (C, H, W) -> (1, C, H, W)
     image_batched = image.unsqueeze(0)
     # Interpolate and remove batch dimension: (1, C, H, W) -> (C, H, W)
-    resized = torch.nn.functional.interpolate(
-        image_batched, size=dims, mode="bilinear", align_corners=False
-    )
+    resized = torch.nn.functional.interpolate(image_batched, size=dims, mode="bilinear", align_corners=False)
 
     return resized.squeeze(0)
 
@@ -96,13 +92,9 @@ def raw_observation_to_observation(
 ) -> Observation:
     observation = {}
 
-    observation = prepare_raw_observation(
-        raw_observation, lerobot_features, policy_image_features
-    )
+    observation = prepare_raw_observation(raw_observation, lerobot_features, policy_image_features)
     for k, v in observation.items():
-        if isinstance(
-            v, torch.Tensor
-        ):  # VLAs present natural-language instructions in observations
+        if isinstance(v, torch.Tensor):  # VLAs present natural-language instructions in observations
             if "image" in k:
                 # Policy expects images in shape (B, C, H, W)
                 observation[k] = prepare_image(v).unsqueeze(0)
@@ -164,16 +156,13 @@ def prepare_raw_observation(
     # state's shape is expected as (B, state_dim)
     state_dict = {OBS_STATE: extract_state_from_raw_observation(lerobot_obs)}
     image_dict = {
-        image_k: extract_images_from_raw_observation(lerobot_obs, image_k)
-        for image_k in image_keys
+        image_k: extract_images_from_raw_observation(lerobot_obs, image_k) for image_k in image_keys
     }
 
     # Turns the image features to (C, H, W) with H, W matching the policy image features.
     # This reduces the resolution of the images
     image_dict = {
-        key: resize_robot_observation_image(
-            torch.tensor(lerobot_obs[key]), policy_image_features[key].shape
-        )
+        key: resize_robot_observation_image(torch.tensor(lerobot_obs[key]), policy_image_features[key].shape)
         for key in image_keys
     }
 
@@ -263,11 +252,7 @@ class FPSTracker:
 
         # Calculate overall average FPS (since start)
         total_duration = current_timestamp - self.first_timestamp
-        avg_fps = (
-            (self.total_obs_count - 1) / total_duration
-            if total_duration > 1e-6
-            else 0.0
-        )
+        avg_fps = (self.total_obs_count - 1) / total_duration if total_duration > 1e-6 else 0.0
 
         return {"avg_fps": avg_fps, "target_fps": self.target_fps}
 
@@ -285,6 +270,7 @@ class RemotePolicyConfig:
     actions_per_chunk: int
     device: str = "cpu"
     rename_map: dict[str, str] = field(default_factory=dict)
+    similarity_fn_name: str = "euclidean"
 
 
 def _compare_observation_states(
@@ -317,6 +303,4 @@ def observations_similar(
     obs2_state = extract_state_from_raw_observation(
         make_lerobot_observation(obs2.get_observation(), lerobot_features)
     )
-    return _compare_observation_states(
-        obs1_state, obs2_state, atol=atol, similarity_fn=similarity_fn
-    )
+    return _compare_observation_states(obs1_state, obs2_state, atol=atol, similarity_fn=similarity_fn)

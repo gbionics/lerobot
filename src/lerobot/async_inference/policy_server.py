@@ -31,7 +31,6 @@ import time
 from concurrent import futures
 from dataclasses import asdict
 from pprint import pformat
-from queue import Empty, Queue
 from typing import Any
 
 import draccus
@@ -72,13 +71,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         # FPS measurement
         self.fps_tracker = FPSTracker(target_fps=config.fps)
 
-        self.observation_queue = Queue(maxsize=1)
-
         self._predicted_timesteps_lock = threading.Lock()
         self._predicted_timesteps = set()
 
-        self._inference_in_progress_lock = threading.Lock()
+        # Single lock guards both _pending_obs and _inference_in_progress so that
+        # "check flag + store obs" and "grab obs + set flag" are each atomic.
+        self._state_lock = threading.Lock()
+        self._pending_obs: TimedObservation | None = None
         self._inference_in_progress = False
+        self._obs_available = threading.Event()
 
         self.last_processed_obs = None
 
@@ -101,15 +102,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
     def _reset_server(self) -> None:
         """Flushes server state when new client connects."""
-        # only running inference on the latest observation received by the server
         self.shutdown_event.set()
-        self.observation_queue = Queue(maxsize=1)
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
 
-        with self._inference_in_progress_lock:
+        with self._state_lock:
+            self._pending_obs = None
             self._inference_in_progress = False
+            self._obs_available.clear()
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -226,65 +227,74 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         client_id = context.peer()
         self.logger.debug(f"Client {client_id} connected for action streaming")
 
-        # Generate action based on the most recent observation and its timestep
-        try:
-            getactions_starts = time.perf_counter()
-            obs = self.observation_queue.get(timeout=self.config.obs_queue_timeout)
-            self.logger.info(
-                f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
-            )
+        # Clear the inference flag at the START of each call. This means the client
+        # has called GetActions again — implying it received the previous actions.
+        # The flag stays True between inference completion and this next call,
+        # preventing observations from being enqueued while actions are in transit.
+        with self._state_lock:
+            self._inference_in_progress = False
 
-            # Mark inference as in progress
-            with self._inference_in_progress_lock:
-                self._inference_in_progress = True
-
-            try:
-                with self._predicted_timesteps_lock:
-                    self._predicted_timesteps.add(obs.get_timestep())
-
-                start_time = time.perf_counter()
-                action_chunk = self._predict_action_chunk(obs)
-                inference_time = time.perf_counter() - start_time
-
-                start_time = time.perf_counter()
-                actions_bytes = pickle.dumps(action_chunk)  # nosec
-                serialize_time = time.perf_counter() - start_time
-
-                # Create and return the action chunk
-                actions = services_pb2.Actions(data=actions_bytes)
-
-                self.logger.info(
-                    f"Action chunk #{obs.get_timestep()} generated | "
-                    f"Total time: {(inference_time + serialize_time) * 1000:.2f}ms"
-                )
-
-                self.logger.debug(
-                    f"Action chunk #{obs.get_timestep()} generated | "
-                    f"Inference time: {inference_time:.2f}s |"
-                    f"Serialize time: {serialize_time:.2f}s |"
-                    f"Total time: {inference_time + serialize_time:.2f}s"
-                )
-
-                time.sleep(
-                    max(
-                        0,
-                        self.config.inference_latency - max(0, time.perf_counter() - getactions_starts),
-                    )
-                )  # sleep controls inference latency
-
-                return actions
-
-            finally:
-                # Always clear the inference_in_progress flag when done
-                with self._inference_in_progress_lock:
-                    self._inference_in_progress = False
-
-        except Empty:  # no observation added to queue in obs_queue_timeout
+        # Wait for an observation to become available
+        if not self._obs_available.wait(timeout=self.config.obs_queue_timeout):
             return services_pb2.Empty()
 
-        except Exception as e:
-            self.logger.error(f"Error in StreamActions: {e}")
+        # Atomically grab the pending observation and mark inference in progress
+        with self._state_lock:
+            obs = self._pending_obs
+            if obs is None:
+                return services_pb2.Empty()
+            self._pending_obs = None
+            self._obs_available.clear()
+            self._inference_in_progress = True
 
+        self.logger.info(
+            f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
+        )
+
+        try:
+            getactions_starts = time.perf_counter()
+
+            with self._predicted_timesteps_lock:
+                self._predicted_timesteps.add(obs.get_timestep())
+
+            start_time = time.perf_counter()
+            action_chunk = self._predict_action_chunk(obs)
+            inference_time = time.perf_counter() - start_time
+
+            start_time = time.perf_counter()
+            actions_bytes = pickle.dumps(action_chunk)  # nosec
+            serialize_time = time.perf_counter() - start_time
+
+            actions = services_pb2.Actions(data=actions_bytes)
+
+            self.logger.info(
+                f"Action chunk #{obs.get_timestep()} generated | "
+                f"Total time: {(inference_time + serialize_time) * 1000:.2f}ms"
+            )
+
+            self.logger.debug(
+                f"Action chunk #{obs.get_timestep()} generated | "
+                f"Inference time: {inference_time:.2f}s |"
+                f"Serialize time: {serialize_time:.2f}s |"
+                f"Total time: {inference_time + serialize_time:.2f}s"
+            )
+
+            time.sleep(
+                max(
+                    0,
+                    self.config.inference_latency - max(0, time.perf_counter() - getactions_starts),
+                )
+            )  # sleep controls inference latency
+
+            # NOTE: _inference_in_progress intentionally stays True here.
+            # It will be cleared when the client calls GetActions again,
+            # confirming it received these actions.
+            return actions
+
+        except Exception as e:
+            self.logger.error(f"Error in GetActions: {e}")
+            with self._state_lock:
+                self._inference_in_progress = False
             return services_pb2.Empty()
 
     def _obs_sanity_checks(self, obs: TimedObservation, previous_obs: TimedObservation) -> bool:
@@ -295,14 +305,6 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         if obs.get_timestep() in predicted_timesteps:
             self.logger.debug(f"Skipping observation #{obs.get_timestep()} - Timestep predicted already!")
             return False
-
-        # Check if an inference is already in progress
-        with self._inference_in_progress_lock:
-            if self._inference_in_progress:
-                self.logger.debug(
-                    f"Skipping observation #{obs.get_timestep()} - Inference already in progress!"
-                )
-                return False
 
         if observations_similar(
             obs,
@@ -318,30 +320,37 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         return True
 
     def _enqueue_observation(self, obs: TimedObservation) -> bool:
-        """Enqueue an observation if it must go through processing, otherwise skip it.
-        Observations not in queue are never run through the policy network"""
+        """Enqueue an observation if it should go through processing, otherwise skip it.
+        Observations not stored are never run through the policy network.
 
-        if (
+        The _state_lock ensures that checking _inference_in_progress and storing
+        _pending_obs is atomic — closing the race with GetActions."""
+
+        should_enqueue = (
             obs.must_go
             or self.last_processed_obs is None
             or self._obs_sanity_checks(obs, self.last_processed_obs)
-        ):
+        )
+
+        if not should_enqueue:
+            return False
+
+        with self._state_lock:
+            if self._inference_in_progress:
+                self.logger.debug(
+                    f"Skipping observation #{obs.get_timestep()} (must_go={obs.must_go}) - "
+                    "Inference already in progress!"
+                )
+                return False
+
             last_obs = self.last_processed_obs.get_timestep() if self.last_processed_obs else "None"
             self.logger.debug(
                 f"Enqueuing observation. Must go: {obs.must_go} | Last processed obs: {last_obs}"
             )
 
-            # If queue is full, get the old observation to make room
-            if self.observation_queue.full():
-                # pops from queue
-                _ = self.observation_queue.get_nowait()
-                self.logger.debug("Observation queue was full, removed oldest observation")
-
-            # Now put the new observation (never blocks as queue is non-full here)
-            self.observation_queue.put(obs)
+            self._pending_obs = obs
+            self._obs_available.set()
             return True
-
-        return False
 
     def _time_action_chunk(self, t_0: float, action_chunk: list[torch.Tensor], i_0: int) -> list[TimedAction]:
         """Turn a chunk of actions into a list of TimedAction instances,

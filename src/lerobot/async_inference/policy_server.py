@@ -77,6 +77,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self._predicted_timesteps_lock = threading.Lock()
         self._predicted_timesteps = set()
 
+        self._inference_in_progress_lock = threading.Lock()
+        self._inference_in_progress = False
+
         self.last_processed_obs = None
 
         # Attributes will be set by SendPolicyInstructions
@@ -104,6 +107,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
+
+        with self._inference_in_progress_lock:
+            self._inference_in_progress = False
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -228,40 +234,50 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 f"Running inference for observation #{obs.get_timestep()} (must_go: {obs.must_go})"
             )
 
-            with self._predicted_timesteps_lock:
-                self._predicted_timesteps.add(obs.get_timestep())
+            # Mark inference as in progress
+            with self._inference_in_progress_lock:
+                self._inference_in_progress = True
 
-            start_time = time.perf_counter()
-            action_chunk = self._predict_action_chunk(obs)
-            inference_time = time.perf_counter() - start_time
+            try:
+                with self._predicted_timesteps_lock:
+                    self._predicted_timesteps.add(obs.get_timestep())
 
-            start_time = time.perf_counter()
-            actions_bytes = pickle.dumps(action_chunk)  # nosec
-            serialize_time = time.perf_counter() - start_time
+                start_time = time.perf_counter()
+                action_chunk = self._predict_action_chunk(obs)
+                inference_time = time.perf_counter() - start_time
 
-            # Create and return the action chunk
-            actions = services_pb2.Actions(data=actions_bytes)
+                start_time = time.perf_counter()
+                actions_bytes = pickle.dumps(action_chunk)  # nosec
+                serialize_time = time.perf_counter() - start_time
 
-            self.logger.info(
-                f"Action chunk #{obs.get_timestep()} generated | "
-                f"Total time: {(inference_time + serialize_time) * 1000:.2f}ms"
-            )
+                # Create and return the action chunk
+                actions = services_pb2.Actions(data=actions_bytes)
 
-            self.logger.debug(
-                f"Action chunk #{obs.get_timestep()} generated | "
-                f"Inference time: {inference_time:.2f}s |"
-                f"Serialize time: {serialize_time:.2f}s |"
-                f"Total time: {inference_time + serialize_time:.2f}s"
-            )
-
-            time.sleep(
-                max(
-                    0,
-                    self.config.inference_latency - max(0, time.perf_counter() - getactions_starts),
+                self.logger.info(
+                    f"Action chunk #{obs.get_timestep()} generated | "
+                    f"Total time: {(inference_time + serialize_time) * 1000:.2f}ms"
                 )
-            )  # sleep controls inference latency
 
-            return actions
+                self.logger.debug(
+                    f"Action chunk #{obs.get_timestep()} generated | "
+                    f"Inference time: {inference_time:.2f}s |"
+                    f"Serialize time: {serialize_time:.2f}s |"
+                    f"Total time: {inference_time + serialize_time:.2f}s"
+                )
+
+                time.sleep(
+                    max(
+                        0,
+                        self.config.inference_latency - max(0, time.perf_counter() - getactions_starts),
+                    )
+                )  # sleep controls inference latency
+
+                return actions
+
+            finally:
+                # Always clear the inference_in_progress flag when done
+                with self._inference_in_progress_lock:
+                    self._inference_in_progress = False
 
         except Empty:  # no observation added to queue in obs_queue_timeout
             return services_pb2.Empty()
@@ -280,7 +296,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.logger.debug(f"Skipping observation #{obs.get_timestep()} - Timestep predicted already!")
             return False
 
-        elif observations_similar(
+        # Check if an inference is already in progress
+        with self._inference_in_progress_lock:
+            if self._inference_in_progress:
+                self.logger.debug(
+                    f"Skipping observation #{obs.get_timestep()} - Inference already in progress!"
+                )
+                return False
+
+        if observations_similar(
             obs,
             previous_obs,
             lerobot_features=self.lerobot_features,
@@ -291,8 +315,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             )
             return False
 
-        else:
-            return True
+        return True
 
     def _enqueue_observation(self, obs: TimedObservation) -> bool:
         """Enqueue an observation if it must go through processing, otherwise skip it.

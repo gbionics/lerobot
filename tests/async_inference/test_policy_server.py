@@ -179,13 +179,19 @@ def test_obs_sanity_checks(policy_server):
     obs_same_ts = _make_obs(torch.ones(6), timestep=1)
     assert policy_server._obs_sanity_checks(obs_same_ts, prev) is False
 
-    # Case 2 – observation too similar
+    # Case 2 – inference already in progress
     policy_server._predicted_timesteps.clear()
-    obs_similar = _make_obs(torch.zeros(6) + 1e-4, timestep=2)
+    policy_server._inference_in_progress = True
+    obs_during_inference = _make_obs(torch.ones(6) * 5, timestep=2)
+    assert policy_server._obs_sanity_checks(obs_during_inference, prev) is False
+
+    # Case 3 – observation too similar
+    policy_server._inference_in_progress = False
+    obs_similar = _make_obs(torch.zeros(6) + 1e-4, timestep=3)
     assert policy_server._obs_sanity_checks(obs_similar, prev) is False
 
-    # Case 3 – genuinely new & dissimilar observation passes
-    obs_ok = _make_obs(torch.ones(6) * 5, timestep=3)
+    # Case 4 – genuinely new & dissimilar observation passes
+    obs_ok = _make_obs(torch.ones(6) * 5, timestep=4)
     assert policy_server._obs_sanity_checks(obs_ok, prev) is True
 
 
@@ -212,6 +218,44 @@ def test_predict_action_chunk(monkeypatch, policy_server):
     timed_actions = policy_server._predict_action_chunk(obs)
 
     assert len(timed_actions) == actions_per_chunk
+    assert [ta.get_timestep() for ta in timed_actions] == list(range(5, 5 + actions_per_chunk))
+
+    for i, ta in enumerate(timed_actions):
+        expected_ts = obs.get_timestamp() + i * policy_server.config.environment_dt
+        assert abs(ta.get_timestamp() - expected_ts) < 1e-6
+
+
+def test_inference_in_progress_prevents_duplicate_enqueue(policy_server):
+    """Test that inference_in_progress flag prevents multiple observations from being enqueued."""
+    # Set a last processed observation.
+    policy_server.last_processed_obs = _make_obs(torch.zeros(6), timestep=0)
+
+    # First observation - very different from last, should be enqueued
+    obs1 = _make_obs(torch.ones(6) * 5, timestep=1)
+    assert policy_server._enqueue_observation(obs1) is True
+    assert policy_server.observation_queue.qsize() == 1
+
+    # Simulate inference in progress
+    with policy_server._inference_in_progress_lock:
+        policy_server._inference_in_progress = True
+
+    # Second observation arrives while inference is in progress - should be filtered
+    obs2 = _make_obs(torch.ones(6) * 6, timestep=2)
+    assert policy_server._enqueue_observation(obs2) is False
+    # Queue should still have only the first observation
+    assert policy_server.observation_queue.qsize() == 1
+
+    # Clear inference flag
+    with policy_server._inference_in_progress_lock:
+        policy_server._inference_in_progress = False
+
+    # Remove the first observation from queue to simulate it was processed
+    policy_server.observation_queue.get_nowait()
+
+    # Now third observation should be enqueued
+    obs3 = _make_obs(torch.ones(6) * 7, timestep=3)
+    assert policy_server._enqueue_observation(obs3) is True
+    assert policy_server.observation_queue.qsize() == 1
     assert [ta.get_timestep() for ta in timed_actions] == list(range(5, 5 + actions_per_chunk))
 
     for i, ta in enumerate(timed_actions):

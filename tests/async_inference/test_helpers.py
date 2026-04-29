@@ -17,6 +17,7 @@ import pickle
 import time
 
 import numpy as np
+import pytest
 import torch
 
 from lerobot.async_inference.configs import get_similarity_function  # noqa: E402

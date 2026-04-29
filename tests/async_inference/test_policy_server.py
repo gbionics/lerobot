@@ -144,8 +144,8 @@ def test_maybe_enqueue_observation_must_go(policy_server):
     """An observation with `must_go=True` is always enqueued."""
     obs = _make_obs(torch.zeros(6), must_go=True)
     assert policy_server._enqueue_observation(obs) is True
-    assert policy_server.observation_queue.qsize() == 1
-    assert policy_server.observation_queue.get_nowait() is obs
+    assert policy_server._pending_obs is obs
+    assert policy_server._obs_available.is_set()
 
 
 def test_maybe_enqueue_observation_dissimilar(policy_server):
@@ -156,7 +156,7 @@ def test_maybe_enqueue_observation_dissimilar(policy_server):
     new_obs = _make_obs(torch.ones(6) * 5)  # High norm difference
 
     assert policy_server._enqueue_observation(new_obs) is True
-    assert policy_server.observation_queue.qsize() == 1
+    assert policy_server._pending_obs is new_obs
 
 
 def test_maybe_enqueue_observation_is_skipped(policy_server):
@@ -167,7 +167,7 @@ def test_maybe_enqueue_observation_is_skipped(policy_server):
     new_obs = _make_obs(torch.zeros(6) + 1e-4)
 
     assert policy_server._enqueue_observation(new_obs) is False
-    assert policy_server.observation_queue.empty() is True
+    assert policy_server._pending_obs is None
 
 
 def test_obs_sanity_checks(policy_server):
@@ -179,19 +179,13 @@ def test_obs_sanity_checks(policy_server):
     obs_same_ts = _make_obs(torch.ones(6), timestep=1)
     assert policy_server._obs_sanity_checks(obs_same_ts, prev) is False
 
-    # Case 2 – inference already in progress
+    # Case 2 – observation too similar
     policy_server._predicted_timesteps.clear()
-    policy_server._inference_in_progress = True
-    obs_during_inference = _make_obs(torch.ones(6) * 5, timestep=2)
-    assert policy_server._obs_sanity_checks(obs_during_inference, prev) is False
-
-    # Case 3 – observation too similar
-    policy_server._inference_in_progress = False
-    obs_similar = _make_obs(torch.zeros(6) + 1e-4, timestep=3)
+    obs_similar = _make_obs(torch.zeros(6) + 1e-4, timestep=2)
     assert policy_server._obs_sanity_checks(obs_similar, prev) is False
 
-    # Case 4 – genuinely new & dissimilar observation passes
-    obs_ok = _make_obs(torch.ones(6) * 5, timestep=4)
+    # Case 3 – genuinely new & dissimilar observation passes
+    obs_ok = _make_obs(torch.ones(6) * 5, timestep=3)
     assert policy_server._obs_sanity_checks(obs_ok, prev) is True
 
 
@@ -233,31 +227,25 @@ def test_inference_in_progress_prevents_duplicate_enqueue(policy_server):
     # First observation - very different from last, should be enqueued
     obs1 = _make_obs(torch.ones(6) * 5, timestep=1)
     assert policy_server._enqueue_observation(obs1) is True
-    assert policy_server.observation_queue.qsize() == 1
+    assert policy_server._pending_obs is obs1
 
     # Simulate inference in progress
-    with policy_server._inference_in_progress_lock:
+    with policy_server._state_lock:
         policy_server._inference_in_progress = True
 
     # Second observation arrives while inference is in progress - should be filtered
     obs2 = _make_obs(torch.ones(6) * 6, timestep=2)
     assert policy_server._enqueue_observation(obs2) is False
-    # Queue should still have only the first observation
-    assert policy_server.observation_queue.qsize() == 1
+    # Pending obs should still be the first one
+    assert policy_server._pending_obs is obs1
 
-    # Clear inference flag
-    with policy_server._inference_in_progress_lock:
+    # Clear inference flag and pending obs to simulate GetActions consuming the observation
+    with policy_server._state_lock:
         policy_server._inference_in_progress = False
-
-    # Remove the first observation from queue to simulate it was processed
-    policy_server.observation_queue.get_nowait()
+        policy_server._pending_obs = None
+        policy_server._obs_available.clear()
 
     # Now third observation should be enqueued
     obs3 = _make_obs(torch.ones(6) * 7, timestep=3)
     assert policy_server._enqueue_observation(obs3) is True
-    assert policy_server.observation_queue.qsize() == 1
-    assert [ta.get_timestep() for ta in timed_actions] == list(range(5, 5 + actions_per_chunk))
-
-    for i, ta in enumerate(timed_actions):
-        expected_ts = obs.get_timestamp() + i * policy_server.config.environment_dt
-        assert abs(ta.get_timestamp() - expected_ts) < 1e-6
+    assert policy_server._pending_obs is obs3

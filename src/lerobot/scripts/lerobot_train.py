@@ -33,6 +33,8 @@ from termcolor import colored
 from torch.optim import Optimizer
 from tqdm import tqdm
 
+from torch.utils.tensorboard import SummaryWriter
+
 from lerobot.common.train_utils import (
     get_step_checkpoint_dir,
     get_step_identifier,
@@ -43,7 +45,7 @@ from lerobot.common.train_utils import (
 from lerobot.common.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.datasets import EpisodeAwareSampler, make_dataset
+from lerobot.datasets import EpisodeAwareSampler, make_dataset, MultiLeRobotDataset
 from lerobot.envs import close_envs, make_env, make_env_pre_post_processors
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
@@ -220,6 +222,13 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         if is_main_process:
             logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
+    # Initialize TensorBoard writer on main process
+    if is_main_process:
+        tb_writer = SummaryWriter(log_dir=str(cfg.output_dir / "tensorboard"))
+        logging.info(colored(f"TensorBoard logs at: {cfg.output_dir / 'tensorboard'}", "cyan", attrs=["bold"]))
+    else:
+        tb_writer = None
+
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)
 
@@ -297,8 +306,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
         processor_kwargs["dataset_stats"] = dataset.meta.stats
 
-    if cfg.is_reward_model_training:
-        processor_kwargs["dataset_meta"] = dataset.meta
+    # Always pass dataset_meta so factories can auto-detect features like subtasks
+    processor_kwargs["dataset_meta"] = dataset.meta
 
     if not cfg.is_reward_model_training and processor_pretrained_path is not None:
         preprocessor_overrides = {
@@ -382,6 +391,62 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
         logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+
+        # ── Subtask feature recap ────────────────────────────────────────
+        use_subtask = getattr(cfg.policy, "use_subtask_generation", False)
+        sep = "=" * 60
+        logging.info(sep)
+        logging.info("  SUBTASK TRAINING CONFIGURATION")
+        logging.info(sep)
+        logging.info(f"  use_subtask_generation flag : {'ON  ✓' if use_subtask else 'OFF'}")
+        sub_datasets = dataset._datasets if isinstance(dataset, MultiLeRobotDataset) else [dataset]
+        for ds in sub_datasets:
+            has_sub = (
+                "subtask_index" in ds.features
+                and getattr(ds.meta, "subtasks", None) is not None
+            )
+            if has_sub:
+                n_subtasks = len(ds.meta.subtasks)
+                logging.info(f"  [{ds.repo_id}] subtasks : YES ({n_subtasks})")
+                for name in ds.meta.subtasks.index:
+                    logging.info(f"      - {name}")
+            else:
+                logging.info(f"  [{ds.repo_id}] subtasks : NO  (identity fallback)")
+        active = use_subtask or any(
+            "subtask_index" in ds.features and getattr(ds.meta, "subtasks", None) is not None
+            for ds in sub_datasets
+        )
+        train_expert_only = getattr(cfg.policy, "train_expert_only", False)
+        subtask_loss_weight = getattr(cfg.policy, "subtask_loss_weight", 1.0)
+        ce_effective = active and not train_expert_only
+        logging.info(f"  Subtask CE loss active     : {'YES ✓' if ce_effective else 'NO'}")
+        if active and train_expert_only:
+            logging.info(
+                "  ⚠ WARNING: use_subtask_generation=True but train_expert_only=True."
+            )
+            logging.info(
+                "    The CE loss targets (PaliGemma hidden states + embed_tokens) are all"
+            )
+            logging.info(
+                "    frozen → CE loss gradient is zero. Subtask CE is DISABLED for training."
+            )
+            logging.info(
+                "    For subtask generation to improve, set train_expert_only=False"
+            )
+            logging.info(
+                "    (or use LoRA on the language model layers)."
+            )
+        if ce_effective:
+            logging.info(f"  subtask_loss_weight        : {subtask_loss_weight}")
+            peft_cfg = getattr(cfg, "peft", None)
+            if peft_cfg is not None:
+                r = getattr(peft_cfg, "r", "?")
+                logging.info(f"  LoRA on PaliGemma LM       : YES (r={r})")
+                logging.info(f"    LM q/v_proj adapters trained → CE loss has gradient path ✓")
+            else:
+                logging.info(f"  LoRA on PaliGemma LM       : NO (full LM fine-tune — check GPU memory!)")
+        logging.info(sep)
+        # ────────────────────────────────────────────────────────────────
 
     # create dataloader for offline training
     if hasattr(active_cfg, "drop_n_last_frames"):
@@ -496,6 +561,18 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     weighter_stats = sample_weighter.get_stats()
                     wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
                 wandb_logger.log_dict(wandb_log_dict, step)
+            if tb_writer:
+                tb_log_dict = train_tracker.to_dict()
+                if output_dict:
+                    tb_log_dict.update(output_dict)
+                if sample_weighter is not None:
+                    weighter_stats = sample_weighter.get_stats()
+                    tb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
+                for k, v in tb_log_dict.items():
+                    try:
+                        tb_writer.add_scalar(f"train/{k}", float(v), step)
+                    except (TypeError, ValueError):
+                        pass
             train_tracker.reset_averages()
 
         if cfg.save_checkpoint and is_saving_step:
@@ -564,6 +641,12 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                     wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                if tb_writer:
+                    for k, v in eval_tracker.to_dict().items():
+                        try:
+                            tb_writer.add_scalar(f"eval/{k}", float(v), step)
+                        except (TypeError, ValueError):
+                            pass
 
             accelerator.wait_for_everyone()
 
@@ -574,6 +657,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         close_envs(eval_env)
 
     if is_main_process:
+        if tb_writer:
+            tb_writer.close()
         logging.info("End of training")
 
         if getattr(active_cfg, "push_to_hub", False):

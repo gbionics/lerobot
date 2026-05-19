@@ -15,6 +15,8 @@
 # limitations under the License.
 
 import builtins
+import copy
+import hashlib
 import logging
 import math
 from collections import deque
@@ -651,12 +653,12 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         return time.to(dtype=torch.float32, device=device)
 
     def embed_prefix(
-        self, images, img_masks, tokens, masks
+        self, images, img_masks, tokens, masks, token_ar_mask=None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer."""
         embs = []
         pad_masks = []
-        att_masks = []
+        num_img_embs_list = []
 
         # Process images
         for img, img_mask in zip(images, img_masks, strict=True):
@@ -669,7 +671,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
-            att_masks += [0] * num_img_embs
+            num_img_embs_list.append(num_img_embs)
 
         # Process language tokens
         def lang_embed_func(tokens):
@@ -680,15 +682,22 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         embs.append(lang_emb)
         pad_masks.append(masks)
 
+        bsize = masks.shape[0]
         num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        num_img_total = sum(num_img_embs_list)
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
-        att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
 
-        bsize = pad_masks.shape[0]
-        att_masks = att_masks[None, :].expand(bsize, len(att_masks))
+        # Build per-sample 2D att_masks [B, prefix_S]
+        # Image tokens always use full bidirectional attention (0 = attend freely)
+        img_att = torch.zeros(bsize, num_img_total, dtype=torch.bool, device=masks.device)
+        if token_ar_mask is not None:
+            # Per-sample causal mask for language tokens (1 = causal block boundary)
+            lang_att = token_ar_mask.bool()  # [B, T_lang]
+        else:
+            lang_att = torch.zeros(bsize, num_lang_embs, dtype=torch.bool, device=masks.device)
+        att_masks = torch.cat([img_att, lang_att], dim=1)  # [B, prefix_S]
 
         return embs, pad_masks, att_masks
 
@@ -739,13 +748,13 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, images, img_masks, tokens, masks, actions, noise, time) -> Tensor:
+    def forward(self, images, img_masks, tokens, masks, actions, noise, time, token_loss_mask=None, token_ar_mask=None, subtask_sample_weights=None) -> tuple[Tensor, Tensor | None]:
         """Do a full training forward pass and compute the loss."""
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks, token_ar_mask=token_ar_mask)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
 
         if (
@@ -764,7 +773,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
         def forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond):
-            (_, suffix_out), _ = self.paligemma_with_expert.forward(
+            (prefix_out, suffix_out), _ = self.paligemma_with_expert.forward(
                 attention_mask=att_2d_masks_4d,
                 position_ids=position_ids,
                 past_key_values=None,
@@ -772,9 +781,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                 use_cache=False,
                 adarms_cond=[None, adarms_cond],
             )
-            return suffix_out
+            return prefix_out, suffix_out
 
-        suffix_out = self._apply_checkpoint(
+        prefix_out, suffix_out = self._apply_checkpoint(
             forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
         )
 
@@ -785,8 +794,40 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             return self.action_out_proj(suffix_out)
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
+        flow_loss = F.mse_loss(u_t, v_t, reduction="none")
 
-        return F.mse_loss(u_t, v_t, reduction="none")
+        # Subtask cross-entropy loss: next-token prediction on the subtask region only.
+        # Skipped when train_expert_only=True: the CE loss uses the frozen PaliGemma backbone
+        # and embed_tokens weight, so its gradient has no trainable target — it would only
+        # inflate the logged loss without affecting learning.
+        subtask_loss = None
+        subtask_token_acc = None
+        if token_loss_mask is not None and not self.config.train_expert_only:
+            num_image_tokens = prefix_embs.shape[1] - tokens.shape[1]
+            # hidden[i] predicts token[i+1], so shift by 1
+            text_hidden = prefix_out[:, num_image_tokens : num_image_tokens + tokens.shape[1] - 1, :]
+            embed_w = self.paligemma_with_expert.paligemma.lm_head.weight  # use lm_head (separate from embed_tokens in this model)
+            logits = F.linear(text_hidden.float(), embed_w.float()) / math.sqrt(text_hidden.shape[-1])  # [B, T-1, V]  (GemmaForCausalLM normalises by sqrt(hidden_size))
+            targets = tokens[:, 1:].long()  # [B, T-1]
+            loss_mask = token_loss_mask[:, 1:].float()  # [B, T-1]
+            log_probs = F.log_softmax(logits, dim=-1)
+            nll = -log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
+            subtask_loss = (nll * loss_mask).sum(1) / loss_mask.sum(1).clamp(min=1)  # [B]
+
+            # Token accuracy: fraction of suffix tokens where argmax == target
+            preds = logits.argmax(dim=-1)  # [B, T-1]
+            correct = (preds == targets).float() * loss_mask  # [B, T-1]
+            subtask_token_acc = correct.sum(1) / loss_mask.sum(1).clamp(min=1)  # [B]
+
+            # Apply per-sample class weights (balanced inverse-frequency) when provided.
+            # subtask_sample_weights: [B], precomputed from batch["subtask_index"] in PI05Policy.
+            weighted_subtask_loss = subtask_loss
+            if subtask_sample_weights is not None:
+                weighted_subtask_loss = subtask_loss * subtask_sample_weights.to(subtask_loss.device)
+
+            flow_loss = flow_loss + self.config.subtask_loss_weight * weighted_subtask_loss[:, None, None]
+
+        return flow_loss, subtask_loss, subtask_token_acc
 
     @torch.no_grad()  # see openpi `sample_actions` (slightly adapted)
     def sample_actions(
@@ -907,6 +948,128 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
 
+    @torch.no_grad()
+    def generate_subtask(self, images, img_masks, tokens, masks, max_new_tokens=50):
+        """Stage 1 of two-stage inference: autoregressively generate subtask tokens.
+
+        Runs the high-level prefix through the VLM and greedily decodes subtask tokens
+        until EOS or max_new_tokens. Uses a KV cache so the prefix is only computed once.
+
+        Args:
+            images, img_masks: Preprocessed images and their validity masks.
+            tokens: Language token IDs [B, T].
+            masks: Language padding mask [B, T].
+            max_new_tokens: Maximum number of subtask tokens to generate.
+
+        Returns:
+            int64[B, gen_len] — generated token IDs (may include EOS).
+        """
+        EOS_TOKEN_ID = 1
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        B = prefix_embs.shape[0]
+        device = prefix_embs.device
+
+        # Eager attention required for KV-cache generation
+        self.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"
+
+        # Forward pass to populate the KV cache with the prefix
+        prefix_att_2d = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_att_4d = self._prepare_attention_masks_4d(prefix_att_2d)
+        prefix_pos_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        (prefix_out, _), kv_cache = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_4d,
+            position_ids=prefix_pos_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+
+        # Vocabulary projection: use lm_head (separate from embed_tokens in this model)
+        embed_w = self.paligemma_with_expert.paligemma.lm_head.weight  # [V, d]
+
+        # Logits from the last real token in the prefix (per sample)
+        prefix_lengths = prefix_pad_masks.sum(dim=1)  # [B]
+        last_hidden = prefix_out[torch.arange(B, device=device), prefix_lengths - 1, :]  # [B, d]
+        logits = F.linear(last_hidden.float(), embed_w.float()) / math.sqrt(last_hidden.shape[-1])  # [B, V]
+
+        generated_ids = []
+
+        for gen_count in range(max_new_tokens):
+            next_token = logits.argmax(dim=-1)  # [B]
+            generated_ids.append(next_token)
+
+            if (next_token == EOS_TOKEN_ID).all():
+                break
+
+            # Embed next token with the same scaling as embed_prefix
+            next_emb = self.paligemma_with_expert.embed_language_tokens(next_token[:, None])  # [B, 1, d]
+            next_emb = next_emb * math.sqrt(next_emb.shape[-1])
+            next_emb = next_emb.to(dtype=prefix_embs.dtype)
+
+            # Attention mask: new token attends to all past tokens (all-zero additive bias = attend)
+            past_len = kv_cache.get_seq_length() if hasattr(kv_cache, "get_seq_length") else (
+                prefix_embs.shape[1] + gen_count
+            )
+            full_att_4d = torch.zeros(B, 1, 1, past_len + 1, dtype=next_emb.dtype, device=device)
+
+            # Position of the new token per sample
+            next_pos = (prefix_lengths + gen_count).unsqueeze(1)  # [B, 1]
+
+            (next_out, _), kv_cache = self.paligemma_with_expert.forward(
+                attention_mask=full_att_4d,
+                position_ids=next_pos,
+                past_key_values=kv_cache,
+                inputs_embeds=[next_emb, None],
+                use_cache=True,
+            )
+
+            logits = F.linear(next_out[:, 0, :].float(), embed_w.float()) / math.sqrt(next_out.shape[-1])  # [B, V]
+
+        if not generated_ids:
+            return torch.zeros(B, 0, dtype=torch.long, device=device)
+        return torch.stack(generated_ids, dim=1)  # [B, gen_len]
+
+    def build_full_tokens(self, tokens, masks, subtask_tokens):
+        """Insert generated subtask tokens into the padded region of the prefix prompt.
+
+        The original prompt is "Task: X. Subtask: [PAD...]". This fills the padding
+        slots with the generated subtask tokens so that sample_actions sees the
+        complete prompt for Stage 2.
+
+        Args:
+            tokens: Original token IDs [B, max_len].
+            masks: Original padding mask [B, max_len].
+            subtask_tokens: Generated token IDs [B, gen_len].
+
+        Returns:
+            (new_tokens, new_masks) with subtask tokens inserted after the real prefix.
+        """
+        B, max_len = tokens.shape
+        gen_len = subtask_tokens.shape[1]
+        if gen_len == 0:
+            return tokens, masks
+
+        prefix_len = masks.sum(dim=1)  # [B] — number of real prefix tokens
+        available = int((max_len - prefix_len).min().item())
+        if gen_len > available:
+            logging.warning(
+                f"Generated subtask has {gen_len} tokens but only {available} padding slots "
+                f"available (max_len={max_len}). Truncating to {available} tokens; subtask may be incomplete."
+            )
+            subtask_tokens = subtask_tokens[:, :available]
+            gen_len = available
+        idx = torch.arange(max_len, device=tokens.device)[None, :]  # [1, max_len]
+        offset = idx - prefix_len[:, None]  # [B, max_len]
+        in_gen = (offset >= 0) & (offset < gen_len)  # [B, max_len]
+        offset_clamped = offset.clamp(0, gen_len - 1)
+        gen_vals = subtask_tokens[torch.arange(B, device=tokens.device)[:, None], offset_clamped]
+
+        new_tokens = torch.where(in_gen, gen_vals, tokens)
+        new_masks = masks | in_gen
+        return new_tokens, new_masks
+
 
 class PI05Policy(PreTrainedPolicy):
     """PI05 Policy for LeRobot."""
@@ -931,6 +1094,25 @@ class PI05Policy(PreTrainedPolicy):
         # Initialize the core PI05 model
         self.init_rtc_processor()
         self.model = PI05Pytorch(config, rtc_processor=self.rtc_processor)
+
+        # Register subtask class weights as a buffer so they're moved to the right device
+        # and included in state_dict. None when use_subtask_generation=False or no weights set.
+        if config.subtask_class_weights is not None:
+            self.register_buffer(
+                "subtask_class_weights",
+                torch.tensor(config.subtask_class_weights, dtype=torch.float32),
+                persistent=False,
+            )
+        else:
+            self.subtask_class_weights = None
+
+        # Subtask names for per-class metric logging, sanitized to valid key strings.
+        if config.subtask_names is not None:
+            self.subtask_metric_names = [
+                name.lower().replace(" ", "_") for name in config.subtask_names
+            ]
+        else:
+            self.subtask_metric_names = None
 
         # Enable gradient checkpointing if requested
         if config.gradient_checkpointing:
@@ -1129,6 +1311,8 @@ class PI05Policy(PreTrainedPolicy):
         self._queues = {
             ACTION: deque(maxlen=self.config.n_action_steps),
         }
+        self._cached_token_key = None
+        self._cached_subtask_tokens = None
 
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
@@ -1243,6 +1427,41 @@ class PI05Policy(PreTrainedPolicy):
         images, img_masks = self._preprocess_images(batch)
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
+        # Two-stage inference: generate subtask then predict actions
+        if self.config.use_subtask_generation:
+            # At inference the processor fills the subtask slot with a fallback (identity = task string).
+            # Truncate to only the ar_mask=0 (prefix) positions so that generate_subtask receives a
+            # clean, short sequence. Using a mask but keeping the full tensor pollutes the KV cache
+            # with padded/fallback K/V states that push the second generated token toward EOS.
+            token_ar_mask = batch.get("token_ar_mask", None)
+            if token_ar_mask is not None:
+                prefix_only = masks & ~token_ar_mask.bool()  # True on prefix positions only
+                prefix_len = int(prefix_only.sum(dim=1).max().item())
+                gen_tokens = tokens[:, :prefix_len]
+                gen_masks = prefix_only[:, :prefix_len]
+            else:
+                gen_tokens = tokens
+                gen_masks = masks
+            # Include a hash of all image tensors so the cache invalidates when visual input changes.
+            # Without this, all steps with the same task string (identical language tokens) reuse
+            # the subtask generated at the very first step, ignoring the actual image content.
+            if len(images) > 0:
+                h = hashlib.md5(usedforsecurity=False)
+                for img in images:
+                    h.update(img.cpu().numpy().tobytes())
+                img_hash = h.digest()
+            else:
+                img_hash = b""
+            token_key = tokens.cpu().numpy().tobytes() + img_hash
+            if token_key != self._cached_token_key:
+                logging.info("Generating subtask tokens...")
+                self._cached_subtask_tokens = self.model.generate_subtask(images, img_masks, gen_tokens, gen_masks)
+                self._cached_token_key = token_key
+                logging.info(f"Generated {self._cached_subtask_tokens.shape[1]} subtask token(s)")
+            # Insert generated subtask into the full token sequence (replacing fallback slot)
+            gen_masks_full = (masks & ~token_ar_mask.bool()) if token_ar_mask is not None else masks
+            tokens, masks = self.model.build_full_tokens(tokens, gen_masks_full, self._cached_subtask_tokens)
+
         # Sample actions using the model (pass through RTC kwargs, no separate state needed for PI05)
         actions = self.model.sample_actions(images, img_masks, tokens, masks, **kwargs)
 
@@ -1270,8 +1489,20 @@ class PI05Policy(PreTrainedPolicy):
         noise = self.model.sample_noise(actions.shape, actions.device)
         time = self.model.sample_time(actions.shape[0], actions.device)
 
+        token_loss_mask = batch.get("token_loss_mask", None)
+        token_ar_mask = batch.get("token_ar_mask", None)
+
+        # Build per-sample subtask class weights if available.
+        # self.subtask_class_weights is a [N_classes] buffer; index by batch subtask_index to get [B].
+        subtask_sample_weights = None
+        if self.subtask_class_weights is not None and "subtask_index" in batch:
+            subtask_idx = batch["subtask_index"].long()
+            subtask_sample_weights = self.subtask_class_weights[subtask_idx]  # [B]
+
         # Compute loss (no separate state needed for PI05)
-        losses = self.model.forward(images, img_masks, tokens, masks, actions, noise, time)
+        losses, subtask_loss, subtask_token_acc = self.model.forward(images, img_masks, tokens, masks, actions, noise, time,
+                                    token_loss_mask=token_loss_mask, token_ar_mask=token_ar_mask,
+                                    subtask_sample_weights=subtask_sample_weights)
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1280,6 +1511,18 @@ class PI05Policy(PreTrainedPolicy):
         loss_dict = {
             "loss_per_dim": losses.mean(dim=[0, 1]).detach().cpu().numpy().tolist(),
         }
+        if subtask_loss is not None:
+            loss_dict["subtask_ce_loss"] = subtask_loss.mean().item()
+            loss_dict["subtask_token_acc"] = subtask_token_acc.mean().item()
+
+            # Per-class accuracy, keyed by human-readable subtask name.
+            if self.subtask_metric_names is not None and "subtask_index" in batch:
+                subtask_idx = batch["subtask_index"].long()  # [B]
+                for class_i, metric_name in enumerate(self.subtask_metric_names):
+                    mask = subtask_idx == class_i
+                    if mask.any():
+                        key = f"subtask_token_acc/{metric_name}"
+                        loss_dict[key] = subtask_token_acc[mask].mean().item()
 
         if reduction == "none":
             # Return per-sample losses (B,) by averaging over time and action dims
@@ -1293,12 +1536,23 @@ class PI05Policy(PreTrainedPolicy):
             return loss, loss_dict
 
     def _get_default_peft_targets(self) -> dict[str, any]:
-        """Return default PEFT target modules for PI0.5 fine-tuning."""
+        """Return default PEFT target modules for PI0.5 fine-tuning.
+
+        Targets:
+        - Action expert attention q/v projections (action learning)
+        - PaliGemma language model attention q/v projections (subtask generation)
+        - Action projections and time MLP (action learning)
+        """
         common_projections = (
             "state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out"
         )
-        target_modules = rf"(.*\.gemma_expert\..*\.self_attn\.(q|v)_proj|model\.({common_projections}))"
+        target_modules = (
+            rf"(.*\.gemma_expert\..*\.self_attn\.(q|v)_proj"
+            rf"|.*\.paligemma\..*\.language_model\..*\.self_attn\.(q|v)_proj"
+            rf"|.*\.paligemma\..*\.language_model\..*\.mlp\.(gate|up|down)_proj"
+            rf"|model\.({common_projections}))"
+        )
         return {
             "target_modules": target_modules,
-            "modules_to_save": [],
+            "modules_to_save": ["lm_head"],
         }

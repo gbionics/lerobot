@@ -83,6 +83,21 @@ class PI05Config(PreTrainedConfig):
     compile_mode: str = "max-autotune"  # Torch compile mode
     device: str | None = None  # Device to use for the model (None = auto-detect)
 
+    # Subtask settings
+    use_subtask_generation: bool = False  # Enable two-stage inference: generate subtask then predict actions
+    # Weight for the subtask cross-entropy loss relative to the flow MSE loss.
+    # Only has effect when use_subtask_generation=True AND train_expert_only=False
+    # (the CE loss has no trainable targets when train_expert_only=True).
+    subtask_loss_weight: float = 1.0
+    # Per-class weights for the subtask CE loss, one float per subtask index (0..N-1).
+    # Auto-computed at make_policy time from the training dataset's frame-count distribution.
+    # w_i = total_frames / (n_classes * count_i)  ->  balanced inverse-frequency weighting.
+    # None = uniform weighting (no rebalancing).
+    subtask_class_weights: list[float] | None = None
+    # Human-readable subtask names ordered by index (0..N-1), auto-populated from ds_meta at make_policy
+    # time. Used to label per-class accuracy metrics (e.g. subtask_token_acc/pick_the_sanitizer).
+    subtask_names: list[str] | None = None
+
     # Finetuning settings
     freeze_vision_encoder: bool = False  # Freeze only the vision encoder
     train_expert_only: bool = False  # Freeze entire VLM, train only action expert and projections

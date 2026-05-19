@@ -273,6 +273,23 @@ def make_pre_post_processors(
             policy configuration type.
     """
     if pretrained_path:
+        # Special case: pi05 subtask pipeline is never saved in the pretrained checkpoint.
+        # Build it from scratch using the dataset stats passed via preprocessor_overrides.
+        # Auto-detect: use subtask processor if the flag is on OR the dataset has subtasks.
+        dataset_meta = kwargs.get("dataset_meta")
+        dataset_has_subtasks = (
+            dataset_meta is not None
+            and getattr(dataset_meta, "subtasks", None) is not None
+        )
+        if isinstance(policy_cfg, PI05Config) and (policy_cfg.use_subtask_generation or dataset_has_subtasks):
+            preprocessor_overrides = kwargs.get("preprocessor_overrides", {})
+            dataset_stats = preprocessor_overrides.get("normalizer_processor", {}).get("stats")
+            from lerobot.policies.pi05.processor_pi05 import make_pi05_subtask_pre_post_processors
+
+            return make_pi05_subtask_pre_post_processors(
+                config=policy_cfg,
+                dataset_stats=dataset_stats,
+            )
         # TODO(Steven): Temporary patch, implement correctly the processors for Gr00t
         if isinstance(policy_cfg, GrootConfig):
             # GROOT handles normalization in groot_pack_inputs_v3 step
@@ -367,12 +384,23 @@ def make_pre_post_processors(
         )
 
     elif isinstance(policy_cfg, PI05Config):
-        from .pi05.processor_pi05 import make_pi05_pre_post_processors
-
-        processors = make_pi05_pre_post_processors(
-            config=policy_cfg,
-            dataset_stats=kwargs.get("dataset_stats"),
+        dataset_meta = kwargs.get("dataset_meta")
+        dataset_has_subtasks = (
+            dataset_meta is not None
+            and getattr(dataset_meta, "subtasks", None) is not None
         )
+        if policy_cfg.use_subtask_generation or dataset_has_subtasks:
+            from lerobot.policies.pi05.processor_pi05 import make_pi05_subtask_pre_post_processors
+            processors = make_pi05_subtask_pre_post_processors(
+                config=policy_cfg,
+                dataset_stats=kwargs.get("dataset_stats"),
+            )
+        else:
+            from lerobot.policies.pi05.processor_pi05 import make_pi05_pre_post_processors
+            processors = make_pi05_pre_post_processors(
+                config=policy_cfg,
+                dataset_stats=kwargs.get("dataset_stats"),
+            )
 
     elif isinstance(policy_cfg, GaussianActorConfig):
         from .gaussian_actor.processor_gaussian_actor import make_gaussian_actor_pre_post_processors
@@ -442,6 +470,44 @@ def make_pre_post_processors(
             raise ValueError(f"Processor for policy type '{policy_cfg.type}' is not implemented.") from e
 
     return processors
+
+
+def _compute_subtask_class_weights(ds_meta: "LeRobotDatasetMetadata") -> list[float]:
+    """Compute balanced inverse-frequency class weights for the subtask CE loss.
+
+    Scans the dataset's data parquet files once to count frames per subtask_index,
+    then returns one weight per subtask class (ordered by index 0..N-1):
+
+        w_i = total_frames / (n_classes * count_i)
+
+    This normalises so that the *expected* weight under the training distribution
+    equals 1.0, preserving the overall loss scale while up-weighting rare classes.
+    """
+    import pandas as pd
+    from pathlib import Path
+
+    root = Path(ds_meta.root)
+    n_classes = len(ds_meta.subtasks)
+
+    # Scan every chunk/parquet file and accumulate frame counts per subtask_index.
+    counts: dict[int, int] = {}
+    data_dir = root / "data"
+    for chunk_dir in sorted(data_dir.iterdir()):
+        if not chunk_dir.is_dir():
+            continue
+        for parquet_file in sorted(chunk_dir.glob("*.parquet")):
+            df = pd.read_parquet(parquet_file, columns=["subtask_index"])
+            for idx, cnt in df["subtask_index"].value_counts().items():
+                counts[int(idx)] = counts.get(int(idx), 0) + int(cnt)
+
+    total = sum(counts.values())
+    weights = [total / (n_classes * counts.get(i, total)) for i in range(n_classes)]
+
+    logging.info(
+        "Subtask class weights (balanced inverse-frequency): "
+        + ", ".join(f"class {i}: {w:.4f} (count={counts.get(i, 0)})" for i, w in enumerate(weights))
+    )
+    return weights
 
 
 def make_policy(
@@ -521,6 +587,20 @@ def make_policy(
         set_dataset_feature_metadata = getattr(cfg, "set_dataset_feature_metadata", None)
         if callable(set_dataset_feature_metadata):
             set_dataset_feature_metadata(ds_meta.features)
+
+    # Auto-compute balanced subtask class weights and populate subtask names when the dataset has
+    # subtask labels. Applies to any policy that declares use_subtask_generation=True.
+    if (
+        ds_meta is not None
+        and getattr(cfg, "use_subtask_generation", False)
+        and getattr(ds_meta, "subtasks", None) is not None
+        and "subtask_index" in (ds_meta.features or {})
+    ):
+        if getattr(cfg, "subtask_class_weights", None) is None:  # don't override explicit values
+            cfg.subtask_class_weights = _compute_subtask_class_weights(ds_meta)
+        if getattr(cfg, "subtask_names", None) is None:
+            # subtasks DataFrame index is ordered by subtask_index value
+            cfg.subtask_names = ds_meta.subtasks.index.tolist()
 
     kwargs["config"] = cfg
 

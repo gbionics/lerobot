@@ -748,11 +748,92 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks, adarms_cond
 
-    def forward(self, images, img_masks, tokens, masks, actions, noise, time, token_loss_mask=None, token_ar_mask=None, subtask_sample_weights=None) -> tuple[Tensor, Tensor | None]:
+    @torch.no_grad()
+    def _scheduled_sampling_tokens(
+        self, images, img_masks, tokens, masks, token_ar_mask, ss_prob: float
+    ) -> Tensor:
+        """Return tokens with AR positions randomly replaced by model predictions.
+
+        For each AR-region position t, independently with probability ss_prob, replaces
+        tokens[:, t] with argmax(logits[:, t-1]) — the prediction the model made at the
+        previous position. This simulates the model's own autoregressive distribution,
+        forcing it to learn to recover from its own mistakes (scheduled sampling).
+
+        Uses a prefix-only no-grad forward pass; image embeddings are re-computed but
+        no gradient memory is allocated (torch.no_grad context).
+
+        Args:
+            ss_prob: Per-token Bernoulli replacement probability, in (0, 1].
+
+        Returns:
+            tokens: [B, T] int64, with some AR positions replaced.
+        """
+        # Prefix-only forward to get logits at each text position.
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
+            images, img_masks, tokens, masks, token_ar_mask=token_ar_mask
+        )
+        prefix_att_2d = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_att_4d = self._prepare_attention_masks_4d(prefix_att_2d)
+        prefix_pos_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+
+        # Match the dtype used in the main forward pass (bfloat16 when model weights are bfloat16).
+        model_dtype = self.paligemma_with_expert.paligemma.model.language_model.layers[0].self_attn.q_proj.weight.dtype
+        prefix_embs = prefix_embs.to(dtype=model_dtype)
+        prefix_att_4d = prefix_att_4d.to(dtype=model_dtype)
+
+        # Suffix is not needed: prefix tokens cannot attend to suffix tokens,
+        # so prefix_out is identical with or without the suffix.
+        (prefix_out, _), _ = self.paligemma_with_expert.forward(
+            attention_mask=prefix_att_4d,
+            position_ids=prefix_pos_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=False,
+        )
+
+        embed_w = self.paligemma_with_expert.paligemma.lm_head.weight  # [V, d]
+        num_image_tokens = prefix_embs.shape[1] - tokens.shape[1]
+        # text_hidden[b, t] is the hidden state after consuming token t; it predicts token t+1.
+        text_hidden = prefix_out[:, num_image_tokens : num_image_tokens + tokens.shape[1] - 1, :]
+        logits = F.linear(text_hidden.float(), embed_w.float()) / math.sqrt(text_hidden.shape[-1])
+        pred_ids = logits.argmax(dim=-1)  # [B, T-1]: predicted next token for each position
+
+        # For position t (1-indexed), the SS replacement is pred_ids[:, t-1]
+        # (the prediction made while consuming position t-1).
+        B, T = tokens.shape
+        replace_ids = tokens.clone()
+        replace_ids[:, 1:] = pred_ids  # replace_ids[:, t] = pred_ids[:, t-1] for t >= 1
+
+        # Only corrupt AR positions, with independent Bernoulli draws.
+        ar_mask = token_ar_mask.bool()  # [B, T]
+        ss_draws = torch.bernoulli(
+            torch.full(ar_mask.shape, ss_prob, dtype=torch.float32, device=ar_mask.device)
+        ).bool()
+        corrupt_mask = ar_mask & ss_draws  # [B, T]
+
+        tokens = tokens.clone()
+        tokens[corrupt_mask] = replace_ids[corrupt_mask]
+        return tokens
+
+    def forward(self, images, img_masks, tokens, masks, actions, noise, time, token_loss_mask=None, token_ar_mask=None, subtask_sample_weights=None, scheduled_sampling_prob: float = 0.0) -> tuple[Tensor, Tensor | None]:
         """Do a full training forward pass and compute the loss."""
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
+
+        # Scheduled sampling: replace a fraction of teacher-forced AR tokens with model
+        # predictions, reducing exposure bias.
+        # IMPORTANT: save original tokens for use as CE targets — only the INPUT embeddings
+        # should use the corrupted tokens. Using corrupted tokens as targets would create
+        # contradictory gradients (e.g. pushing P(EOS) up at the exact failure position).
+        orig_tokens = tokens
+        if (scheduled_sampling_prob > 0.0
+                and token_ar_mask is not None
+                and token_loss_mask is not None
+                and not self.config.train_expert_only):
+            tokens = self._scheduled_sampling_tokens(
+                images, img_masks, tokens, masks, token_ar_mask, scheduled_sampling_prob
+            )
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks, token_ar_mask=token_ar_mask)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(x_t, time)
@@ -808,7 +889,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             text_hidden = prefix_out[:, num_image_tokens : num_image_tokens + tokens.shape[1] - 1, :]
             embed_w = self.paligemma_with_expert.paligemma.lm_head.weight  # use lm_head (separate from embed_tokens in this model)
             logits = F.linear(text_hidden.float(), embed_w.float()) / math.sqrt(text_hidden.shape[-1])  # [B, T-1, V]  (GemmaForCausalLM normalises by sqrt(hidden_size))
-            targets = tokens[:, 1:].long()  # [B, T-1]
+            targets = orig_tokens[:, 1:].long()  # [B, T-1] — always ground-truth, never SS-corrupted
             loss_mask = token_loss_mask[:, 1:].float()  # [B, T-1]
             log_probs = F.log_softmax(logits, dim=-1)
             nll = -log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)  # [B, T-1]
@@ -1120,6 +1201,9 @@ class PI05Policy(PreTrainedPolicy):
 
         self.model.to(config.device)
 
+        # Training step counter for scheduled sampling (incremented by update()).
+        self._training_step: int = 0
+
         self.reset()
 
     @classmethod
@@ -1314,6 +1398,32 @@ class PI05Policy(PreTrainedPolicy):
         self._cached_token_key = None
         self._cached_subtask_tokens = None
 
+    def update(self) -> None:
+        """Called once per optimizer step by the training loop; advances the scheduled-sampling schedule."""
+        self._training_step += 1
+
+    def _compute_ss_prob(self) -> float:
+        """Return the current scheduled-sampling probability based on the training step.
+
+        Schedule (linear ramp):
+            ε = 0                                                         t < ss_warmup_steps
+            ε = ss_max_prob * (t - ss_warmup_steps) / ss_ramp_steps      ss_warmup_steps <= t < ss_warmup_steps + ss_ramp_steps
+            ε = ss_max_prob                                               t >= ss_warmup_steps + ss_ramp_steps
+        Returns 0.0 when scheduled sampling is disabled (ss_warmup_steps == 0).
+        """
+        cfg = self.config
+        if (not cfg.use_subtask_generation
+                or cfg.train_expert_only
+                or cfg.ss_warmup_steps == 0):
+            return 0.0
+        t = self._training_step
+        if t < cfg.ss_warmup_steps:
+            return 0.0
+        elapsed = t - cfg.ss_warmup_steps
+        if elapsed >= cfg.ss_ramp_steps:
+            return cfg.ss_max_prob
+        return cfg.ss_max_prob * elapsed / cfg.ss_ramp_steps
+
     def init_rtc_processor(self):
         """Initialize RTC processor if RTC is enabled in config."""
         self.rtc_processor = None
@@ -1499,10 +1609,14 @@ class PI05Policy(PreTrainedPolicy):
             subtask_idx = batch["subtask_index"].long()
             subtask_sample_weights = self.subtask_class_weights[subtask_idx]  # [B]
 
+        # Scheduled sampling probability for this step (0.0 during eval / no-SS config).
+        ss_prob = self._compute_ss_prob() if self.training else 0.0
+
         # Compute loss (no separate state needed for PI05)
         losses, subtask_loss, subtask_token_acc = self.model.forward(images, img_masks, tokens, masks, actions, noise, time,
                                     token_loss_mask=token_loss_mask, token_ar_mask=token_ar_mask,
-                                    subtask_sample_weights=subtask_sample_weights)
+                                    subtask_sample_weights=subtask_sample_weights,
+                                    scheduled_sampling_prob=ss_prob)
 
         # Truncate losses to actual action dimensions
         original_action_dim = self.config.output_features[ACTION].shape[0]
@@ -1511,6 +1625,8 @@ class PI05Policy(PreTrainedPolicy):
         loss_dict = {
             "loss_per_dim": losses.mean(dim=[0, 1]).detach().cpu().numpy().tolist(),
         }
+        if ss_prob > 0.0:
+            loss_dict["scheduled_sampling_prob"] = ss_prob
         if subtask_loss is not None:
             loss_dict["subtask_ce_loss"] = subtask_loss.mean().item()
             loss_dict["subtask_token_acc"] = subtask_token_acc.mean().item()

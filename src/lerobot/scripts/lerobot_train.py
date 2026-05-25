@@ -453,6 +453,16 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                 logging.info(f"    LM q/v_proj adapters trained → CE loss has gradient path ✓")
             else:
                 logging.info(f"  LoRA on PaliGemma LM       : NO (full LM fine-tune — check GPU memory!)")
+            ss_warmup = getattr(cfg.policy, "ss_warmup_steps", 0)
+            ss_ramp   = getattr(cfg.policy, "ss_ramp_steps", 5000)
+            ss_max    = getattr(cfg.policy, "ss_max_prob", 0.5)
+            if ss_warmup > 0:
+                logging.info(f"  Scheduled sampling         : ENABLED")
+                logging.info(f"    warmup steps : {ss_warmup}  (pure teacher forcing until then)")
+                logging.info(f"    ramp steps   : {ss_ramp}   (linear ε ramp 0 → {ss_max})")
+                logging.info(f"    max ε        : {ss_max}    (plateau from step {ss_warmup + ss_ramp} onward)")
+            else:
+                logging.info(f"  Scheduled sampling         : DISABLED (ss_warmup_steps=0)")
         logging.info(sep)
         # ────────────────────────────────────────────────────────────────
 

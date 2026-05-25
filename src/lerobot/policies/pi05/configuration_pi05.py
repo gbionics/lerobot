@@ -98,6 +98,17 @@ class PI05Config(PreTrainedConfig):
     # time. Used to label per-class accuracy metrics (e.g. subtask_token_acc/pick_the_sanitizer).
     subtask_names: list[str] | None = None
 
+    # Scheduled sampling: gradually replace teacher-forced subtask tokens with model predictions
+    # to reduce exposure bias. Only active when use_subtask_generation=True and train_expert_only=False.
+    # At training step t:
+    #   ε = 0                                              if t < ss_warmup_steps
+    #   ε = ss_max_prob * (t - ss_warmup_steps) / ss_ramp_steps   if ss_warmup_steps <= t < ss_warmup_steps + ss_ramp_steps
+    #   ε = ss_max_prob                                    if t >= ss_warmup_steps + ss_ramp_steps
+    # Set ss_warmup_steps = 0 to disable scheduled sampling entirely.
+    ss_warmup_steps: int = 0    # training steps of pure teacher forcing before SS starts
+    ss_ramp_steps: int = 5000   # steps over which ε ramps linearly from 0 → ss_max_prob
+    ss_max_prob: float = 0.5    # maximum per-token replacement probability
+
     # Finetuning settings
     freeze_vision_encoder: bool = False  # Freeze only the vision encoder
     train_expert_only: bool = False  # Freeze entire VLM, train only action expert and projections

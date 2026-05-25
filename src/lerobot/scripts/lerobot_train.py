@@ -401,6 +401,14 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         logging.info(f"  use_subtask_generation flag : {'ON  ✓' if use_subtask else 'OFF'}")
         sub_datasets = dataset._datasets if isinstance(dataset, MultiLeRobotDataset) else [dataset]
         for ds in sub_datasets:
+            tasks = getattr(ds.meta, "tasks", None)
+            if tasks is not None:
+                task_names = list(tasks.index) if hasattr(tasks, "index") else list(tasks)
+                logging.info(f"  [{ds.repo_id}] tasks ({len(task_names)}):")
+                for t in task_names:
+                    logging.info(f"      TASK: \"{t}\"")
+            else:
+                logging.info(f"  [{ds.repo_id}] tasks : (none found in meta)")
             has_sub = (
                 "subtask_index" in ds.features
                 and getattr(ds.meta, "subtasks", None) is not None

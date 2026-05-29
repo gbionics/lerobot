@@ -179,6 +179,8 @@ class LeRobotDatasetMetadata:
         self.tasks = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
         self.stats = load_stats(self.root)
+        subtasks_path = self.root / "meta" / "subtasks.parquet"
+        self.subtasks = pd.read_parquet(subtasks_path) if subtasks_path.exists() else None
 
     def ensure_readable(self) -> None:
         """Guarantee metadata is fully loaded for read operations.

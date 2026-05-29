@@ -1084,9 +1084,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             if (next_token == EOS_TOKEN_ID).all():
                 break
 
-            # Embed next token with the same scaling as embed_prefix
+            # Embed next token — embed_language_tokens already applies sqrt(d) scaling
+            # internally via GemmaTextScaledWordEmbedding.embed_scale; do NOT multiply again.
             next_emb = self.paligemma_with_expert.embed_language_tokens(next_token[:, None])  # [B, 1, d]
-            next_emb = next_emb * math.sqrt(next_emb.shape[-1])
             next_emb = next_emb.to(dtype=prefix_embs.dtype)
 
             # Attention mask: new token attends to all past tokens (all-zero additive bias = attend)

@@ -371,6 +371,11 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
+        # Restore the scheduled-sampling step counter so the SS schedule resumes
+        # from the correct point instead of restarting from 0.
+        unwrapped_policy = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+        if hasattr(unwrapped_policy, "_training_step"):
+            unwrapped_policy._training_step = step
 
     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
     num_total_params = sum(p.numel() for p in policy.parameters())

@@ -1,0 +1,97 @@
+# subtask_mem_vqa_ergocub — Hi-Robot blend tuned for iCub ergocub cameras.
+#
+# Supervision: subtask + memory + camera-grounded VQA across four ergocub camera keys:
+#
+#   observation.images.left_eye    (left stereo camera)
+#   observation.images.right_eye   (right stereo camera)
+#   observation.images.right_arm   (right wrist/gripper camera)
+#   observation.images.left_arm    (left wrist/gripper camera)
+#
+# The annotation pipeline emits VQA per camera, so each anchor frame
+# produces four (user, assistant) rows tagged with their source camera.
+# Each VQA sub-recipe consumes the rows for one camera via the
+# ``camera=...`` resolver bindings.
+#
+# Spatial VQA targets (bbox / point) are rewritten from JSON to
+# PaliGemma ``<locDDDD>`` tokens by ``_messages_vqa_to_loc``.
+
+blend:
+
+  high_level_subtask:
+    weight: 0.20
+    messages:
+      - {role: user, content: "${task}", stream: high_level}
+      - {role: assistant, content: "${subtask}", stream: high_level, target: true, if_present: subtask}
+
+  low_level_execution:
+    weight: 0.40
+    messages:
+      - {role: user, content: "${subtask}", stream: low_level, if_present: subtask}
+
+  memory_update:
+    weight: 0.10
+    bindings:
+      prior_memory: "nth_prev(style=memory, offset=1)"
+      current_memory: "active_at(t, style=memory)"
+      completed_subtask: "nth_prev(style=subtask, offset=1)"
+    messages:
+      - {role: user, content: "${task}", stream: high_level}
+      - {role: assistant, content: "Previous memory: ${prior_memory}", stream: high_level, if_present: prior_memory}
+      - {role: user, content: "Completed subtask: ${completed_subtask}", stream: high_level, if_present: completed_subtask}
+      - {role: assistant, content: "${current_memory}", stream: high_level, target: true, if_present: current_memory}
+
+  ask_vqa_left_eye:
+    weight: 0.07
+    bindings:
+      vqa_query: "emitted_at(t, style=vqa, role=user, camera=observation.images.left_eye)"
+      vqa: "emitted_at(t, style=vqa, role=assistant, camera=observation.images.left_eye)"
+    messages:
+      - role: user
+        stream: high_level
+        if_present: vqa_query
+        content:
+          - {type: image, feature: observation.images.left_eye}
+          - {type: text, text: "${vqa_query}"}
+      - {role: assistant, content: "${vqa}", stream: high_level, target: true, if_present: vqa}
+
+  ask_vqa_right_eye:
+    weight: 0.07
+    bindings:
+      vqa_query: "emitted_at(t, style=vqa, role=user, camera=observation.images.right_eye)"
+      vqa: "emitted_at(t, style=vqa, role=assistant, camera=observation.images.right_eye)"
+    messages:
+      - role: user
+        stream: high_level
+        if_present: vqa_query
+        content:
+          - {type: image, feature: observation.images.right_eye}
+          - {type: text, text: "${vqa_query}"}
+      - {role: assistant, content: "${vqa}", stream: high_level, target: true, if_present: vqa}
+
+  ask_vqa_right_arm:
+    weight: 0.05
+    bindings:
+      vqa_query: "emitted_at(t, style=vqa, role=user, camera=observation.images.right_arm)"
+      vqa: "emitted_at(t, style=vqa, role=assistant, camera=observation.images.right_arm)"
+    messages:
+      - role: user
+        stream: high_level
+        if_present: vqa_query
+        content:
+          - {type: image, feature: observation.images.right_arm}
+          - {type: text, text: "${vqa_query}"}
+      - {role: assistant, content: "${vqa}", stream: high_level, target: true, if_present: vqa}
+
+  ask_vqa_left_arm:
+    weight: 0.04
+    bindings:
+      vqa_query: "emitted_at(t, style=vqa, role=user, camera=observation.images.left_arm)"
+      vqa: "emitted_at(t, style=vqa, role=assistant, camera=observation.images.left_arm)"
+    messages:
+      - role: user
+        stream: high_level
+        if_present: vqa_query
+        content:
+          - {type: image, feature: observation.images.left_arm}
+          - {type: text, text: "${vqa_query}"}
+      - {role: assistant, content: "${vqa}", stream: high_level, target: true, if_present: vqa}

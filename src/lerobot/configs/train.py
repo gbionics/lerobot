@@ -111,6 +111,7 @@ class TrainPipelineConfig(HubMixin):
     scheduler: LRSchedulerConfig | None = None
     eval: EvalConfig = field(default_factory=EvalConfig)
     wandb: WandBConfig = field(default_factory=WandBConfig)
+    tensorboard_enable: bool = False
     ema: EMAConfig = field(default_factory=EMAConfig)
     peft: PeftConfig | None = None
 

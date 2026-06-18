@@ -26,6 +26,12 @@ from contextlib import nullcontext
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 
+try:
+    from torch.utils.tensorboard import SummaryWriter as TensorboardWriter
+    _TENSORBOARD_AVAILABLE = True
+except ImportError:
+    _TENSORBOARD_AVAILABLE = False
+
 if TYPE_CHECKING:
     from accelerate import Accelerator
 
@@ -395,6 +401,16 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         wandb_logger = None
         if is_main_process:
             logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+
+    # Initialize tensorboard on main process when explicitly enabled
+    tb_writer = None
+    if cfg.tensorboard_enable and is_main_process:
+        if _TENSORBOARD_AVAILABLE:
+            _tb_log_dir = cfg.output_dir / "tensorboard"
+            tb_writer = TensorboardWriter(log_dir=str(_tb_log_dir))
+            logging.info(colored(f"Tensorboard logs: {_tb_log_dir}", "yellow", attrs=["bold"]))
+        else:
+            logging.warning("tensorboard not installed; skipping TB logging. Install with: pip install tensorboard")
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)
@@ -785,23 +801,29 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
         if is_log_step:
             logging.info(train_tracker)
-            if wandb_logger:
-                wandb_log_dict = train_tracker.to_dict()
+            if wandb_logger or tb_writer:
+                log_dict = train_tracker.to_dict()
                 if output_dict:
-                    wandb_log_dict.update(output_dict)
+                    log_dict.update(output_dict)
                 # Log sample weighting statistics if enabled
                 if sample_weighter is not None:
                     weighter_stats = sample_weighter.get_stats()
-                    wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
-                # EMA observability: ``ema.step`` is the count of
-                # ``ema.update()`` calls (= optimizer steps once EMA is
-                # enabled); ``ema.initted`` flips to True once we've
-                # crossed ``update_after_step``.
+                    log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
                 if ema is not None:
-                    wandb_log_dict["ema/step"] = int(ema.step.item())
-                    wandb_log_dict["ema/initted"] = float(ema.initted.item())
-                    wandb_log_dict["ema/beta"] = float(cfg.ema.decay)
-                wandb_logger.log_dict(wandb_log_dict, step)
+                    # EMA observability: ``ema.step`` is the count of
+                    # ``ema.update()`` calls (= optimizer steps once EMA is
+                    # enabled); ``ema.initted`` flips to True once we've
+                    # crossed ``update_after_step``.
+                    log_dict["ema/step"] = int(ema.step.item())
+                    log_dict["ema/initted"] = float(ema.initted.item())
+                    log_dict["ema/beta"] = float(cfg.ema.decay)
+                if wandb_logger:
+                    wandb_logger.log_dict(log_dict, step)
+                if tb_writer:
+                    for k, v in log_dict.items():
+                        if isinstance(v, (int, float)):
+                            tb_writer.add_scalar(k, v, global_step=step)
+                    tb_writer.flush()
             train_tracker.reset_averages()
 
         # Periodic training-example dump to wandb (camera images + text
@@ -935,6 +957,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     if is_main_process:
         logging.info("End of training")
+
+        if tb_writer is not None:
+            tb_writer.close()
 
         if getattr(active_cfg, "push_to_hub", False):
             unwrapped_model = accelerator.unwrap_model(policy)

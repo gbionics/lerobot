@@ -377,9 +377,33 @@ class ActionTokenizerProcessorStep(ActionProcessorStep):
         elif self.action_tokenizer_name is not None:
             if AutoProcessor is None:
                 raise ImportError("AutoProcessor is not available")
-            self.action_tokenizer = AutoProcessor.from_pretrained(
-                self.action_tokenizer_name, trust_remote_code=self.trust_remote_code
-            )
+            try:
+                self.action_tokenizer = AutoProcessor.from_pretrained(
+                    self.action_tokenizer_name, trust_remote_code=self.trust_remote_code
+                )
+            except ValueError:
+                # Workaround: physical-intelligence/fast declares `attributes = ["bpe_tokenizer"]`
+                # which causes transformers to look for a `bpe_tokenizer/` subfolder that doesn't
+                # exist on the hub. Load the processor class and tokenizer directly instead.
+                import json as _json
+                from pathlib import Path as _Path
+                from huggingface_hub import snapshot_download as _snap_dl
+                from transformers import PreTrainedTokenizerFast as _PreTok
+                from transformers.dynamic_module_utils import get_class_from_dynamic_module as _get_cls
+
+                _snap = _Path(_snap_dl(self.action_tokenizer_name))
+                with open(_snap / "processor_config.json") as _fp:
+                    _cfg = _json.load(_fp)
+                _class_ref = _cfg.get("auto_map", {}).get("AutoProcessor")
+                if _class_ref is None:
+                    raise
+                for _k in ("processor_class", "auto_map", "tokenizer_class"):
+                    _cfg.pop(_k, None)
+                _ProcessorCls = _get_cls(
+                    _class_ref, self.action_tokenizer_name, trust_remote_code=self.trust_remote_code
+                )
+                _bpe_tok = _PreTok.from_pretrained(str(_snap))
+                self.action_tokenizer = _ProcessorCls(_bpe_tok, **_cfg)
         else:
             raise ValueError(
                 "Either 'action_tokenizer' or 'action_tokenizer_name' must be provided. "

@@ -2042,6 +2042,8 @@ class WallXPolicy(PreTrainedPolicy):
         self.eval()
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
+        self._apply_pending_flush()
+
         # Use action queue
         if len(self._queues[ACTION]) == 0:
             actions = self.predict_action_chunk(batch)

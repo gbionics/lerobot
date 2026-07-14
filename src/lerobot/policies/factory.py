@@ -53,6 +53,7 @@ from .molmoact2.configuration_molmoact2 import MolmoAct2Config
 from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
 from .pi0.configuration_pi0 import PI0Config
 from .pi05.configuration_pi05 import PI05Config
+from .pi05_cotrain.configuration_pi05 import PI05CoTrainConfig
 from .pretrained import PreTrainedPolicy
 from .smolvla.configuration_smolvla import SmolVLAConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig
@@ -90,7 +91,7 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
 
     Args:
         name: The name of the policy. Supported names are "tdmpc", "diffusion", "act",
-            "multi_task_dit", "vqbet", "pi0", "pi05", "gaussian_actor", "smolvla", "wall_x",
+            "multi_task_dit", "vqbet", "pi0", "pi05", "pi05_cotrain", "gaussian_actor", "smolvla", "wall_x",
             "molmoact2".
     Returns:
         The policy class corresponding to the given name.
@@ -128,6 +129,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         return PI0FastPolicy
     elif name == "pi05":
         from .pi05.modeling_pi05 import PI05Policy
+
+        return PI05Policy
+    elif name == "pi05_cotrain":
+        from .pi05_cotrain.modeling_pi05 import PI05Policy
 
         return PI05Policy
     elif name == "gaussian_actor":
@@ -178,7 +183,7 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
 
     Args:
         policy_type: The type of the policy. Supported types include "tdmpc",
-                     "multi_task_dit", "diffusion", "act", "vqbet", "pi0", "pi05", "gaussian_actor",
+                     "multi_task_dit", "diffusion", "act", "vqbet", "pi0", "pi05", "pi05_cotrain", "gaussian_actor",
                      "smolvla", "wall_x", "molmoact2".
         **kwargs: Keyword arguments to be passed to the configuration class constructor.
 
@@ -202,6 +207,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return PI0Config(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
+    elif policy_type == "pi05_cotrain":
+        return PI05CoTrainConfig(**kwargs)
     elif policy_type == "gaussian_actor":
         return GaussianActorConfig(**kwargs)
     elif policy_type == "smolvla":
@@ -375,6 +382,14 @@ def make_pre_post_processors(
 
     elif isinstance(policy_cfg, PI05Config):
         from .pi05.processor_pi05 import make_pi05_pre_post_processors
+
+        processors = make_pi05_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, PI05CoTrainConfig):
+        from .pi05_cotrain.processor_pi05 import make_pi05_pre_post_processors
 
         processors = make_pi05_pre_post_processors(
             config=policy_cfg,

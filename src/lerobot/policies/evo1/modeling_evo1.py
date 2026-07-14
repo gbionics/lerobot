@@ -523,6 +523,9 @@ class Evo1Policy(PreTrainedPolicy):
             "RTC is not supported for select_action, use it with predict_action_chunk"
         )
         self.eval()
+
+        self._apply_pending_flush()
+
         if len(self._action_queue) == 0:
             action_chunk = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
             self._action_queue.extend(action_chunk.transpose(0, 1))

@@ -412,6 +412,8 @@ class LingBotVAPolicy(PreTrainedPolicy):
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
 
+        self._apply_pending_flush()
+
         if not self._started:
             # First call: this observation conditions the first chunk (it is *not* a keyframe).
             self._started = True

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -25,6 +26,7 @@ import torch.nn.functional as F  # noqa: N812
 from PIL import Image
 from torch import Tensor, nn
 
+from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.pretrained import PreTrainedPolicy, T
 from lerobot.policies.utils import populate_queues
 from lerobot.utils.constants import ACTION, OBS_STATE
@@ -138,6 +140,10 @@ class VLAJEPAModel(nn.Module):
         `output_hidden_states=True` is post-norm (tied to `last_hidden_state` via
         `@capture_outputs`). A forward hook on `language_model.layers[-1]` recovers
         the correct pre-RMSNorm state, matching the training-time representation.
+
+        For inference diagnostics, set VLA_JEPA_QWEN_DECODER_LAYER to another
+        decoder-layer index such as -2 or 24 to feed the action head from that
+        pre-RMSNorm layer instead of the final one.
         """
         captured: list[torch.Tensor] = []
 
@@ -145,8 +151,11 @@ class VLAJEPAModel(nn.Module):
             h = output[0] if isinstance(output, tuple) else output
             captured.append(h)
 
-        last_layer = self.qwen.model.model.language_model.layers[-1]
-        handle = last_layer.register_forward_hook(_hook)
+        layers = self.qwen.model.model.language_model.layers
+        layer_index = int(os.environ.get("VLA_JEPA_QWEN_DECODER_LAYER", "-1"))
+        layer_index = 27
+        selected_layer = layers[layer_index]
+        handle = selected_layer.register_forward_hook(_hook)
         try:
             self.qwen.model(
                 **qwen_inputs,
@@ -406,10 +415,24 @@ class VLAJEPAPolicy(PreTrainedPolicy):
             # compatibility), so validate_features() may have read stale dims from a pretrained
             # config. Override state_dim/action_dim from the actual dataset being used.
             ds_features = dataset_meta.features
+            rename_map = kwargs.get("rename_map") or {}
+            allowed_visual_keys = set(rename_map.values()) if rename_map else set(ds_features)
+            config.input_features = {
+                key: feature
+                for key, feature in config.input_features.items()
+                if feature.type is not FeatureType.VISUAL or key in allowed_visual_keys
+            }
             if OBS_STATE in ds_features:
-                config.state_dim = ds_features[OBS_STATE]["shape"][0]
+                state_shape = tuple(ds_features[OBS_STATE]["shape"])
+                config.input_features[OBS_STATE] = PolicyFeature(
+                    type=FeatureType.STATE,
+                    shape=state_shape,
+                )
+                config.state_dim = state_shape[0]
             if ACTION in ds_features:
                 config.action_dim = ds_features[ACTION]["shape"][0]
+
+        logging.info("VLA-JEPA visual inputs used by the policy: %s", list(config.image_features))
 
         self.model = VLAJEPAModel(config)
         self.reset()
@@ -621,6 +644,18 @@ class VLAJEPAPolicy(PreTrainedPolicy):
                 f"reinit_modules: skipping {len(reinitialized)} tensor(s) with mismatched shapes "
                 f"(randomly re-initialised):\n  " + "\n  ".join(reinitialized)
             )
+
+        embed_key = "model.qwen.model.model.language_model.embed_tokens.weight"
+        lm_head_key = "model.qwen.model.lm_head.weight"
+        if embed_key not in filtered and lm_head_key in filtered and embed_key in current:
+            if filtered[lm_head_key].shape == current[embed_key].shape:
+                filtered[embed_key] = filtered[lm_head_key].clone()
+                logging.info("VLA-JEPA: restored Qwen input embeddings from tied lm_head.weight")
+            else:
+                logging.warning(
+                    "VLA-JEPA: cannot restore Qwen input embeddings from lm_head.weight because "
+                    f"shapes differ ({tuple(filtered[lm_head_key].shape)} vs {tuple(current[embed_key].shape)})"
+                )
 
         from lerobot.policies.utils import log_model_loading_keys
 

@@ -32,6 +32,7 @@ SUPPORTED_POLICIES = [
     "pi0",
     "pi05",
     "groot",
+    "vla_jepa",
 ]
 
 # TODO: Add all other robots

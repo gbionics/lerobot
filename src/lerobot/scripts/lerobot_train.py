@@ -49,6 +49,7 @@ from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
 from lerobot.rewards import make_reward_pre_post_processors
 from lerobot.utils.collate import lerobot_collate_fn
+from lerobot.utils.constants import OBS_STATE, PRETRAINED_MODEL_DIR
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
@@ -274,6 +275,42 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             ds_meta=dataset.meta,
             rename_map=cfg.rename_map,
         )
+
+    if is_main_process:
+        resolved_policy_dir = cfg.output_dir / PRETRAINED_MODEL_DIR
+        resolved_policy_dir.mkdir(parents=True, exist_ok=True)
+        policy.config.save_pretrained(resolved_policy_dir)
+        cfg.save_pretrained(resolved_policy_dir)
+        logging.info(f"Saved resolved policy config to {resolved_policy_dir}")
+
+        if cfg.policy.type == "vla_jepa":
+            state_feature = policy.config.input_features.get(OBS_STATE)
+            state_encoder = policy.model.action_model.state_encoder
+            state_encoder_dim = None
+            if state_encoder is not None:
+                state_encoder_dim = state_encoder[0].in_features
+
+            if state_feature is None:
+                logging.warning(
+                    "VLA-JEPA action head is NOT using state: observation.state is missing from "
+                    "policy.config.input_features."
+                )
+            elif state_encoder_dim != policy.config.state_dim:
+                logging.warning(
+                    "VLA-JEPA state feature/action-head mismatch: observation.state shape=%s, "
+                    "config.state_dim=%s, state_encoder.in_features=%s.",
+                    state_feature.shape,
+                    policy.config.state_dim,
+                    state_encoder_dim,
+                )
+            else:
+                logging.info(
+                    "VLA-JEPA action head is using state: observation.state shape=%s, "
+                    "config.state_dim=%s, state_encoder.in_features=%s.",
+                    state_feature.shape,
+                    policy.config.state_dim,
+                    state_encoder_dim,
+                )
 
     if cfg.peft is not None:
         if cfg.is_reward_model_training:

@@ -547,6 +547,9 @@ def make_policy(
     if ds_meta is not None:
         kwargs["dataset_meta"] = ds_meta
 
+    if rename_map is not None:
+        kwargs["rename_map"] = rename_map
+
     if not cfg.pretrained_path and cfg.use_peft:
         raise ValueError(
             "Instantiating a policy with `use_peft=True` without a checkpoint is not supported since that requires "

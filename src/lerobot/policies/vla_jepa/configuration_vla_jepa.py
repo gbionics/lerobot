@@ -53,8 +53,8 @@ class VLAJEPAConfig(PreTrainedConfig):
     special_action_token: str = "<|action_{}|>"
     embodied_action_token: str = "<|embodied_action|>"
 
-    action_dim: int = 7
-    state_dim: int = 8
+    action_dim: int = 31
+    state_dim: int = 31
 
     num_action_tokens_per_timestep: int = 8
     num_embodied_action_tokens_per_instruction: int = 32

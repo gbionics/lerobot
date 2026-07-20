@@ -29,7 +29,7 @@ version = "0.6.1"
 description = "🤗 LeRobot: State-of-the-art Machine Learning for Real-World Robotics in Pytorch"
 dynamic = ["readme"]
 license = { text = "Apache-2.0" }
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 authors = [
     { name = "Rémi Cadène", email = "re.cadene@gmail.com" },
     { name = "Simon Alibert", email = "alibert.sim@gmail.com" },
@@ -60,9 +60,9 @@ keywords = ["lerobot", "huggingface", "robotics",  "machine learning", "artifici
 dependencies = [
     # Core ML
     "torch>=2.7,<2.12.0",
-    "torchvision>=0.22.0,<0.27.0",
-    "numpy>=2.0.0,<2.3.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Upper bound imposed by opencv-python-headless.
-    "opencv-python-headless>=4.9.0,<4.14.0",
+    "torchvision>=0.22.0",
+    "numpy>=1.26.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Upper bound imposed by opencv-python-headless.
+    "opencv-python-headless>=4.9.0",
     "Pillow>=10.0.0,<13.0.0",
     "einops>=0.8.0,<0.9.0",
 
@@ -85,9 +85,6 @@ dependencies = [
     "termcolor>=2.4.0,<4.0.0",
     "tqdm>=4.66.0,<5.0.0",
 
-    # Build tools (required by opencv-python-headless on some platforms)
-    "cmake>=3.29.0.1,<4.2.0",
-    "setuptools>=71.0.0,<81.0.0",
 ]
 
 # Optional dependencies
@@ -105,12 +102,7 @@ dataset = [
     #   - win32 x86_64                     : wheels since 0.7.0  (needs torch>=2.8).
     #   - linux aarch64/arm64              : wheels since 0.11.0 (needs torch>=2.11).
     #   - macOS x86_64 (Intel) and linux armv7l: no wheels in any released version -> fall through to the PyAV decoder.
-    # Each platform gets its own line so the resolver picks the minimum version that has a wheel for it.
-
-    # Other torch/torchcodec pairings (informational): 0.8.1 = ffmpeg>=8 support, 0.10 = system-wide ffmpeg support, 0.12 needs torch==2.12.
-    "torchcodec>=0.3.0,<0.12.0; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')) or (sys_platform == 'darwin' and platform_machine == 'arm64')",
-    "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
-    "torchcodec>=0.11.0,<0.12.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')",
+    "torchcodec>=0.3.0",
     "jsonlines>=4.0.0,<5.0.0",
 ]
 training = [
@@ -125,7 +117,6 @@ hardware = [
 ]
 viz = [
     "rerun-sdk>=0.24.0,<0.34.0",
-    "foxglove-sdk>=0.25.1,<0.26.0",
 ]
 # ── User-facing composite extras (map to CLI scripts) ─────
 # lerobot-record, lerobot-replay, lerobot-calibrate, lerobot-teleoperate, etc.
@@ -148,7 +139,7 @@ pygame-dep = ["pygame>=2.5.1,<2.7.0"]
 # -> .so.11) ship newer sonames, so left unpinned the resolver grabs them and `import placo`
 # fails at load with "liburdfdom_sensor.so.4.0: cannot open shared object file" (see #3755).
 # There is no cmeel-urdfdom 5.x; <5 selects the 4.x ABI the placo/pin wheels are built against.
-placo-dep = ["placo>=0.9.6,<0.9.16", "cmeel-urdfdom>=4,<5", "cmeel-tinyxml2<11"]
+placo-dep = ["placo>=0.9.6"]
 transformers-dep = ["transformers>=5.4.0,<5.6.0"]
 grpcio-dep = ["grpcio>=1.73.1,<2.0.0", "protobuf>=6.31.1,<8.0.0"]
 accelerate-dep = ["accelerate>=1.14.0,<2.0.0"]
@@ -198,8 +189,8 @@ reachy2 = [
 rebot = ["lerobot[motorbridge-dep]", "lerobot[motorbridge-smart-servo-dep]"]
 kinematics = ["lerobot[placo-dep]"]
 intelrealsense = [
-    "pyrealsense2>=2.55.1.6486,<2.57.0 ; sys_platform != 'darwin'",
-    "pyrealsense2-macosx>=2.54,<2.57.0 ; sys_platform == 'darwin'",
+    "pyrealsense2>=2.55.1.6486 ; sys_platform != 'darwin'",
+    "pyrealsense2-macosx>=2.54 ; sys_platform == 'darwin'",
 ]
 phone = ["hebi-py>=2.8.0,<2.12.0", "teleop>=0.1.0,<0.2.0", "fastapi<1.0", "lerobot[scipy-dep]"]
 
@@ -266,7 +257,7 @@ video_benchmark = ["scikit-image>=0.23.2,<0.26.0", "pandas>=2.2.2,<2.4.0"]
 
 # Simulation
 # NOTE: Explicitly listing scipy helps flatten the dependecy tree.
-aloha = ["lerobot[dataset]", "gym-aloha>=0.1.4,<0.2.0", "lerobot[scipy-dep]"]
+aloha = ["lerobot[dataset]", "gym-aloha>=0.1.4,<0.2.0"]
 pusht = ["lerobot[dataset]", "gym-pusht>=0.1.5,<0.2.0", "pymunk>=6.6.0,<7.0.0"] # TODO: Fix pymunk version in gym-pusht instead
 libero = ["lerobot[dataset]", "lerobot[transformers-dep]", "hf-libero>=0.1.4,<0.2.0; sys_platform == 'linux'", "lerobot[scipy-dep]"]
 metaworld = ["lerobot[dataset]", "metaworld==3.0.0", "lerobot[scipy-dep]"]

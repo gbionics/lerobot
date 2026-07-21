@@ -74,6 +74,43 @@ def _migrate_legacy_rabc_fields(config: dict[str, Any]) -> dict[str, Any] | None
 
 
 @dataclass
+class BatchSamplingConfig:
+    """Configuration for strict human/robot batch composition during offline training."""
+
+    human_ratio: float = 0.5
+    source_column: str = "source_type"
+    human_values: list[str] = field(default_factory=lambda: ["human"])
+    robot_values: list[str] = field(default_factory=lambda: ["robot"])
+    fallback_policy: str = "oversample"
+    seed: int | None = None
+
+    def validate(self) -> None:
+        if not 0.0 <= self.human_ratio <= 1.0:
+            raise ValueError(f"batch_sampling.human_ratio must be in [0, 1], got {self.human_ratio}")
+
+        if not self.source_column.strip():
+            raise ValueError("batch_sampling.source_column must be a non-empty string")
+
+        if not self.human_values:
+            raise ValueError("batch_sampling.human_values must contain at least one label")
+
+        if not self.robot_values:
+            raise ValueError("batch_sampling.robot_values must contain at least one label")
+
+        overlap = set(self.human_values) & set(self.robot_values)
+        if overlap:
+            raise ValueError(
+                f"batch_sampling.human_values and batch_sampling.robot_values overlap: {sorted(overlap)}"
+            )
+
+        if self.fallback_policy != "oversample":
+            raise ValueError(
+                "batch_sampling.fallback_policy currently supports only 'oversample', "
+                f"got {self.fallback_policy!r}"
+            )
+
+
+@dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
     env: envs.EnvConfig | None = None
@@ -116,6 +153,9 @@ class TrainPipelineConfig(HubMixin):
     # Sample weighting configuration (e.g., for RA-BC training)
     sample_weighting: SampleWeightingConfig | None = None
 
+    # Optional strict per-batch sampling configuration for mixed human/robot datasets.
+    batch_sampling: BatchSamplingConfig | None = None
+
     # Rename map for the observation to override the image and state keys
     rename_map: dict[str, str] = field(default_factory=dict)
     checkpoint_path: Path | None = field(init=False, default=None)
@@ -133,6 +173,9 @@ class TrainPipelineConfig(HubMixin):
         return self.policy  # type: ignore[return-value]
 
     def validate(self) -> None:
+        if self.batch_sampling is not None:
+            self.batch_sampling.validate()
+
         # HACK: We parse again the cli args here to get the pretrained paths if there was some.
         policy_path = parser.get_path_arg("policy")
         reward_model_path = parser.get_path_arg("reward_model")

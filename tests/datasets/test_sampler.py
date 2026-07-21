@@ -26,6 +26,11 @@ from lerobot.datasets.io_utils import (
     hf_transform_to_torch,
 )
 from lerobot.datasets.sampler import EpisodeAwareSampler
+from lerobot.datasets.sampler import (
+    HumanRobotRatioBatchSampler,
+    build_episode_source_map,
+    split_indices_by_episode_source,
+)
 
 
 def calculate_episode_data_index(hf_dataset: Dataset) -> dict[str, torch.Tensor]:
@@ -137,3 +142,92 @@ def test_partial_episode_drop_warns(caplog):
     # Episode 0 is skipped (1 frame, drop 1), Episode 1 keeps frames 2-5
     assert sampler.indices == [2, 3, 4, 5]
     assert "Episode 0" in caplog.text
+
+
+def test_build_episode_source_map():
+    episodes = Dataset.from_dict(
+        {
+            "episode_index": [0, 1, 2],
+            "source_type": ["human", "robot", "human"],
+        }
+    )
+
+    source_map = build_episode_source_map(episodes, "source_type")
+
+    assert source_map == {0: "human", 1: "robot", 2: "human"}
+
+
+def test_build_episode_source_map_missing_column_raises():
+    episodes = Dataset.from_dict(
+        {
+            "episode_index": [0, 1],
+            "collector": ["human", "robot"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="was not found"):
+        build_episode_source_map(episodes, "source_type")
+
+
+def test_split_indices_by_episode_source():
+    frame_episode_indices = [0, 0, 1, 1, 2, 2]
+    episode_source_map = {0: "human", 1: "robot", 2: "human"}
+    indices = [0, 1, 2, 3, 4, 5]
+
+    human_indices, robot_indices = split_indices_by_episode_source(
+        indices,
+        frame_episode_indices,
+        episode_source_map,
+        human_values=["human"],
+        robot_values=["robot"],
+        source_column="source_type",
+    )
+
+    assert human_indices == [0, 1, 4, 5]
+    assert robot_indices == [2, 3]
+
+
+def test_human_robot_ratio_batch_sampler_strict_ratio():
+    sampler = HumanRobotRatioBatchSampler(
+        human_indices=[0, 1, 2, 3],
+        robot_indices=[10, 11, 12, 13],
+        batch_size=4,
+        human_ratio=0.5,
+        seed=123,
+    )
+
+    batches = list(iter(sampler))
+
+    assert len(batches) == len(sampler)
+    for batch in batches:
+        human_count = sum(index in {0, 1, 2, 3} for index in batch)
+        robot_count = sum(index in {10, 11, 12, 13} for index in batch)
+        assert human_count == 2
+        assert robot_count == 2
+
+
+def test_human_robot_ratio_batch_sampler_oversamples_minority():
+    sampler = HumanRobotRatioBatchSampler(
+        human_indices=[0],
+        robot_indices=[10, 11, 12, 13],
+        batch_size=4,
+        human_ratio=0.5,
+        seed=456,
+    )
+
+    batch = next(iter(sampler))
+    human_count = sum(index == 0 for index in batch)
+    robot_count = sum(index in {10, 11, 12, 13} for index in batch)
+
+    assert human_count == 2
+    assert robot_count == 2
+
+
+def test_human_robot_ratio_batch_sampler_requires_present_source():
+    with pytest.raises(ValueError, match="requires human samples"):
+        HumanRobotRatioBatchSampler(
+            human_indices=[],
+            robot_indices=[10, 11],
+            batch_size=4,
+            human_ratio=0.5,
+        )

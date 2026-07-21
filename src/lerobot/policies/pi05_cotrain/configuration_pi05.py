@@ -83,6 +83,13 @@ class PI05CoTrainConfig(PreTrainedConfig):
     # Add empty images. Used to add empty cameras when no image features are present.
     empty_cameras: int = 0
 
+    # Optional source-aware camera availability rules used in mixed-source batches.
+    # If ``is_human`` is present in a batch, cameras listed here are masked per sample.
+    # Example: set ``human_missing_image_keys=['observation.images.wrist']`` when
+    # human samples do not provide wrist images.
+    human_missing_image_keys: list[str] = field(default_factory=list)
+    robot_missing_image_keys: list[str] = field(default_factory=list)
+
     tokenizer_max_length: int = 200  # see openpi `__post_init__`
 
     normalization_mapping: dict[str, NormalizationMode] = field(
@@ -134,6 +141,13 @@ class PI05CoTrainConfig(PreTrainedConfig):
 
         if self.dtype not in ["bfloat16", "float32"]:
             raise ValueError(f"Invalid dtype: {self.dtype}")
+
+        overlap = set(self.human_missing_image_keys) & set(self.robot_missing_image_keys)
+        if overlap:
+            raise ValueError(
+                "human_missing_image_keys and robot_missing_image_keys overlap: "
+                f"{sorted(overlap)}"
+            )
 
     def validate_features(self) -> None:
         """Validate and set up input/output features."""

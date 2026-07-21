@@ -44,6 +44,11 @@ from lerobot.common.wandb_utils import WandBLogger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets import EpisodeAwareSampler, make_dataset
+from lerobot.datasets.sampler import (
+    HumanRobotRatioBatchSampler,
+    build_episode_source_map,
+    split_indices_by_episode_source,
+)
 from lerobot.envs import close_envs, make_env, make_env_pre_post_processors
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
@@ -397,22 +402,72 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         shuffle = True
         sampler = None
 
+    batch_sampler = None
+    if cfg.batch_sampling is not None:
+        base_indices = list(sampler.indices) if sampler is not None else list(range(len(dataset)))
+        episode_source_map = build_episode_source_map(
+            dataset.meta.episodes,
+            cfg.batch_sampling.source_column,
+        )
+        frame_episode_indices = dataset.hf_dataset["episode_index"]
+        human_indices, robot_indices = split_indices_by_episode_source(
+            base_indices,
+            frame_episode_indices,
+            episode_source_map,
+            cfg.batch_sampling.human_values,
+            cfg.batch_sampling.robot_values,
+            cfg.batch_sampling.source_column,
+        )
+
+        ratio_seed = cfg.batch_sampling.seed if cfg.batch_sampling.seed is not None else cfg.seed
+        if ratio_seed is not None:
+            ratio_seed += accelerator.process_index
+
+        batch_sampler = HumanRobotRatioBatchSampler(
+            human_indices=human_indices,
+            robot_indices=robot_indices,
+            batch_size=cfg.batch_size,
+            human_ratio=cfg.batch_sampling.human_ratio,
+            seed=ratio_seed,
+        )
+        sampler = None
+        shuffle = False
+
+        if is_main_process:
+            logging.info(
+                "Enabled batch sampling with human_ratio=%.3f (human_per_batch=%d, robot_per_batch=%d). "
+                "Source pools: human=%d robot=%d",
+                cfg.batch_sampling.human_ratio,
+                batch_sampler.num_human_per_batch,
+                batch_sampler.num_robot_per_batch,
+                len(human_indices),
+                len(robot_indices),
+            )
+
     # Only swap in the language-aware collate when the dataset actually
     # declares language columns; otherwise stay on PyTorch's default
     # collate so non-language training runs are unaffected.
     collate_fn = lerobot_collate_fn if dataset.meta.has_language_columns else None
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        num_workers=cfg.num_workers,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle and not cfg.dataset.streaming,
-        sampler=sampler,
-        pin_memory=device.type == "cuda",
-        drop_last=False,
-        collate_fn=collate_fn,
-        prefetch_factor=cfg.prefetch_factor if cfg.num_workers > 0 else None,
-        persistent_workers=cfg.persistent_workers and cfg.num_workers > 0,
-    )
+    dataloader_kwargs = {
+        "dataset": dataset,
+        "num_workers": cfg.num_workers,
+        "pin_memory": device.type == "cuda",
+        "collate_fn": collate_fn,
+        "prefetch_factor": cfg.prefetch_factor if cfg.num_workers > 0 else None,
+        "persistent_workers": cfg.persistent_workers and cfg.num_workers > 0,
+    }
+    if batch_sampler is not None:
+        dataloader_kwargs["batch_sampler"] = batch_sampler
+    else:
+        dataloader_kwargs.update(
+            {
+                "batch_size": cfg.batch_size,
+                "shuffle": shuffle and not cfg.dataset.streaming,
+                "sampler": sampler,
+                "drop_last": False,
+            }
+        )
+    dataloader = torch.utils.data.DataLoader(**dataloader_kwargs)
 
     # Prepare everything with accelerator
     accelerator.wait_for_everyone()

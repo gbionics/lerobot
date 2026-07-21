@@ -138,6 +138,88 @@ def make_att_2d_masks(pad_masks, att_masks):  # see openpi `make_att_2d_masks` (
     return att_2d_masks & pad_2d_masks
 
 
+def _normalize_batch_bool_mask(mask_value: Tensor | list | tuple, bsize: int, device: torch.device) -> Tensor:
+    if not torch.is_tensor(mask_value):
+        mask_tensor = torch.as_tensor(mask_value)
+    else:
+        mask_tensor = mask_value
+
+    mask_tensor = mask_tensor.to(device=device).reshape(-1)
+    if mask_tensor.numel() != bsize:
+        raise ValueError(
+            f"Expected per-sample mask with {bsize} elements, got {mask_tensor.numel()} elements."
+        )
+    if mask_tensor.dtype != torch.bool:
+        mask_tensor = mask_tensor != 0
+    return mask_tensor
+
+
+def resolve_image_validity_mask(
+    batch: dict[str, Tensor],
+    image_key: str,
+    bsize: int,
+    device: torch.device,
+    is_human: Tensor | None = None,
+    human_missing_image_keys: list[str] | None = None,
+    robot_missing_image_keys: list[str] | None = None,
+) -> Tensor:
+    """Build a per-sample validity mask for an image key.
+
+    Priority:
+    1) Explicit per-sample mask in batch (e.g. ``<key>_is_valid``)
+    2) Source-aware masking using ``is_human`` and config key lists
+    3) Default: all samples are valid
+    """
+    mask = torch.ones(bsize, dtype=torch.bool, device=device)
+
+    candidate_keys = (
+        f"{image_key}_is_valid",
+        f"{image_key}.is_valid",
+        f"{image_key}_valid",
+        f"{image_key}.valid",
+        f"{image_key}_mask",
+        f"{image_key}.mask",
+    )
+    for candidate_key in candidate_keys:
+        if candidate_key in batch:
+            return _normalize_batch_bool_mask(batch[candidate_key], bsize, device)
+
+    if is_human is None:
+        return mask
+
+    human_missing_image_keys = human_missing_image_keys or []
+    robot_missing_image_keys = robot_missing_image_keys or []
+    is_human_mask = _normalize_batch_bool_mask(is_human, bsize, device)
+
+    if image_key in human_missing_image_keys:
+        # Human samples miss this camera.
+        mask = mask & (~is_human_mask)
+
+    if image_key in robot_missing_image_keys:
+        # Robot samples miss this camera.
+        mask = mask & is_human_mask
+
+    return mask
+
+
+def apply_image_validity_mask(image_tensor: Tensor, validity_mask: Tensor) -> Tensor:
+    """Replace invalid per-sample images with SigLIP padding value (-1)."""
+    if validity_mask.dtype != torch.bool:
+        raise ValueError("validity_mask must be boolean")
+    if image_tensor.ndim != 4:
+        raise ValueError(f"Expected image tensor with shape [B, ...], got ndim={image_tensor.ndim}")
+    if image_tensor.shape[0] != validity_mask.shape[0]:
+        raise ValueError(
+            "Image and validity mask batch dimensions differ: "
+            f"{image_tensor.shape[0]} vs {validity_mask.shape[0]}"
+        )
+    if validity_mask.all():
+        return image_tensor
+    image_tensor = image_tensor.clone()
+    image_tensor[~validity_mask] = -1.0
+    return image_tensor
+
+
 def clone_past_key_values(past_key_values):
     """Clone the DynamicCache returned by prefix prefill for compiled denoising."""
     return DynamicCache(
@@ -1160,6 +1242,7 @@ class PI05Policy(PreTrainedPolicy):
 
         # Get device from model parameters
         device = next(self.parameters()).device
+        is_human = batch.get("is_human")
 
         present_img_keys = [key for key in self.config.image_features if key in batch]
         missing_img_keys = [key for key in self.config.image_features if key not in batch]
@@ -1200,10 +1283,19 @@ class PI05Policy(PreTrainedPolicy):
             if is_channels_first:
                 img = img.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
 
-            images.append(img)
-            # Create mask (all ones for real images)
             bsize = img.shape[0]
-            mask = torch.ones(bsize, dtype=torch.bool, device=device)
+            mask = resolve_image_validity_mask(
+                batch,
+                key,
+                bsize,
+                device,
+                is_human=is_human,
+                human_missing_image_keys=self.config.human_missing_image_keys,
+                robot_missing_image_keys=self.config.robot_missing_image_keys,
+            )
+            img = apply_image_validity_mask(img, mask)
+
+            images.append(img)
             img_masks.append(mask)
 
         # Create image features not present in the batch as fully 0 padded images
